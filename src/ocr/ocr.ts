@@ -75,9 +75,14 @@ export function initOcr(): Promise<Worker> {
       },
     })
       .then(async (worker) => {
+        // Kein SINGLE_LINE: der Ausschnitt enthält mehrere Textzeilen
+        // (Nummer + Copyright). SINGLE_LINE staucht das ganze Bild auf eine
+        // Zeilenhöhe zusammen -> Ziffern werden winzig -> leeres Ergebnis.
+        // SINGLE_BLOCK liest alle Zeilen; die Nummer filtert danach der
+        // Regex + Nenner-Check. Ebenfalls bewusst KEINE Ziffern-Whitelist:
+        // LSTM liefert mit Whitelist auf gemischtem Text oft gar nichts.
         await worker.setParameters({
-          tessedit_char_whitelist: '0123456789/',
-          tessedit_pageseg_mode: PSM.SINGLE_LINE,
+          tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
         });
         setStatus({ state: 'ready', detail: 'initialisiert' });
         return worker;

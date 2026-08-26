@@ -26,6 +26,8 @@ const SCAN_INTERVAL_MS = 320;
 const LOCK_MS = 2000;
 /** Zwei übereinstimmende Lesungen innerhalb dieses Fensters = Treffer. */
 const CONSENSUS_WINDOW_MS = 2200;
+/** Höhe der Nummern-Ausschnitte als Anteil des Führungsrahmens. */
+const CORNER_H = 0.18;
 
 interface SideDiag {
   raw: string;
@@ -207,8 +209,10 @@ export function Scanner({ activeSet, onHit }: Props) {
     const video = videoRef.current;
     if (!video || !guide) return null;
 
+    // 18 % Höhe statt 13 %: verzeiht, wenn die Karte nicht exakt am unteren
+    // Rahmenrand liegt (die Nummer wurde sonst nur knapp erwischt).
     const cropW = 0.46 * guide.w;
-    const cropH = 0.13 * guide.h;
+    const cropH = CORNER_H * guide.h;
     const cx = side === 'left' ? guide.x : guide.x + guide.w - cropW;
     const cy = guide.y + guide.h - cropH;
     const rect = mapRectToVideo(cx, cy, cropW, cropH);
@@ -539,18 +543,18 @@ export function Scanner({ activeSet, onHit }: Props) {
               className="guide-corner"
               style={{
                 left: guide.x,
-                top: guide.y + guide.h * 0.87,
+                top: guide.y + guide.h * (1 - CORNER_H),
                 width: guide.w * 0.46,
-                height: guide.h * 0.13,
+                height: guide.h * CORNER_H,
               }}
             />
             <div
               className="guide-corner"
               style={{
                 left: guide.x + guide.w * 0.54,
-                top: guide.y + guide.h * 0.87,
+                top: guide.y + guide.h * (1 - CORNER_H),
                 width: guide.w * 0.46,
-                height: guide.h * 0.13,
+                height: guide.h * CORNER_H,
               }}
             />
           </>
