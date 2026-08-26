@@ -438,6 +438,74 @@ select {
   margin-top: 14px;
 }
 
+/* --- Scanner-Diagnose --- */
+
+.diag {
+  margin-top: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.diag summary {
+  cursor: pointer;
+  font-weight: 600;
+  min-height: 32px;
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: minmax(130px, auto) 1fr;
+  gap: 4px 12px;
+  margin: 10px 0;
+  font-size: 0.85rem;
+}
+
+.diag-grid dt {
+  color: var(--muted);
+}
+
+.diag-grid dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.diag-bad {
+  color: #ff9c9c;
+  font-weight: 600;
+}
+
+.diag-label {
+  margin: 12px 0 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.diag-frame,
+.diag-crop {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #000;
+  margin-bottom: 6px;
+  image-rendering: pixelated;
+}
+
+.diag-assets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.8rem;
+  font-family: ui-monospace, monospace;
+}
+
+.diag-assets li {
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
 /* --- Modal (Set-Verwaltung) --- */
 
 .modal-backdrop {

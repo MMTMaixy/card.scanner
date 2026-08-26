@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { initOcr, recognizeDigits } from '../ocr/ocr';
+import {
+  checkOcrAssets,
+  getOcrStatus,
+  initOcr,
+  onOcrStatus,
+  recognizeDigits,
+  type AssetCheck,
+  type OcrStatus,
+} from '../ocr/ocr';
 import { normalizeLocalId, parseScanText, scanMatchesSet } from '../logic/numberParse';
 import { hashImageSource } from '../phash/dhash';
 import { buildHashIndex, loadHashIndex, matchHash } from '../phash/matcher';
@@ -19,15 +27,75 @@ const LOCK_MS = 2000;
 /** Zwei übereinstimmende Lesungen innerhalb dieses Fensters = Treffer. */
 const CONSENSUS_WINDOW_MS = 2200;
 
+interface SideDiag {
+  raw: string;
+  parsed: string;
+  ms: number;
+}
+
+interface DiagInfo {
+  framesAnalyzed: number;
+  framesSkipped: number;
+  skipReason: string;
+  videoInfo: string;
+  captureInfo: string;
+  brightness: string;
+  left: SideDiag | null;
+  right: SideDiag | null;
+}
+
+const EMPTY_DIAG: DiagInfo = {
+  framesAnalyzed: 0,
+  framesSkipped: 0,
+  skipReason: '',
+  videoInfo: '–',
+  captureInfo: '–',
+  brightness: '–',
+  left: null,
+  right: null,
+};
+
+/**
+ * Wartet, bis das Video wirklich Bilder liefert: loadedmetadata ist gefeuert
+ * UND videoWidth > 0. Vorher auf die Canvas zu zeichnen ergäbe leere Frames.
+ */
+function waitForVideoReady(video: HTMLVideoElement, timeoutMs: number): Promise<void> {
+  if (video.videoWidth > 0 && video.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const check = () => {
+      if (video.videoWidth > 0 && video.readyState >= 2) {
+        cleanup();
+        resolve();
+      } else if (Date.now() - started > timeoutMs) {
+        cleanup();
+        reject(
+          new Error(
+            `Video wird nicht bereit (videoWidth=${video.videoWidth}, readyState=${video.readyState}) — der Kamerastream liefert keine Bilder.`,
+          ),
+        );
+      }
+    };
+    const timer = setInterval(check, 100);
+    video.addEventListener('loadedmetadata', check);
+    function cleanup() {
+      clearInterval(timer);
+      video.removeEventListener('loadedmetadata', check);
+    }
+  });
+}
+
 export function Scanner({ activeSet, onHit }: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [flash, setFlash] = useState<'ok' | null>(null);
   const [guide, setGuide] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [indexProgress, setIndexProgress] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<{ localId: string; distance: number; name: string }[] | null>(null);
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>(getOcrStatus());
+  const [assetChecks, setAssetChecks] = useState<AssetCheck[] | null>(null);
+  const [diag, setDiag] = useState<DiagInfo>(EMPTY_DIAG);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -39,6 +107,13 @@ export function Scanner({ activeSet, onHit }: Props) {
   const audioRef = useRef<AudioContext | null>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pausedRef = useRef(false);
+  const countersRef = useRef({ analyzed: 0, skipped: 0 });
+  const diagFrameRef = useRef<HTMLCanvasElement>(null);
+  const diagLeftRef = useRef<HTMLCanvasElement>(null);
+  const diagRightRef = useRef<HTMLCanvasElement>(null);
+
+  // OCR-Ladestatus live anzeigen (initialisiert / lädt / Fehler)
+  useEffect(() => onOcrStatus(setOcrStatus), []);
 
   const stop = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -48,7 +123,6 @@ export function Scanner({ activeSet, onHit }: Props) {
     pendingRef.current = null;
     busyRef.current = false;
     setPhase('idle');
-    setOcrStatus(null);
   }, []);
 
   useEffect(() => stop, [stop]);
@@ -171,6 +245,46 @@ export function Scanner({ activeSet, onHit }: Props) {
     return canvas;
   }
 
+  /** Diagnose: Frame-Vorschau zeichnen und mittlere Helligkeit bestimmen. */
+  function updateFrameDiag(video: HTMLVideoElement): string {
+    const canvas = diagFrameRef.current;
+    if (!canvas) return '–';
+    const w = 320;
+    const h = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * w));
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return '–';
+    ctx.drawImage(video, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 32) {
+      sum += data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      n++;
+    }
+    const mean = n ? sum / n : 0;
+    if (mean < 3) return `${mean.toFixed(1)} — Frame ist SCHWARZ, Capture liefert keine Bilder!`;
+    return mean.toFixed(1);
+  }
+
+  function copyToDiagCanvas(src: HTMLCanvasElement, dest: HTMLCanvasElement | null) {
+    if (!dest) return;
+    dest.width = src.width;
+    dest.height = src.height;
+    dest.getContext('2d')?.drawImage(src, 0, 0);
+  }
+
+  function describeParse(raw: string): string {
+    const parsed = parseScanText(raw);
+    if (!parsed) return 'kein Zähler/Nenner-Muster';
+    if (!activeSet) return `gelesen ${parsed.numerator}/${parsed.denominator}, kein Set aktiv`;
+    const fits = scanMatchesSet(parsed, activeSet);
+    return `gelesen ${parsed.numerator}/${parsed.denominator} — Nenner ${
+      fits ? 'passt' : `passt NICHT (erwartet ${activeSet.officialCount})`
+    }`;
+  }
+
   const handleReading = useCallback(
     async (text: string): Promise<boolean> => {
       if (!activeSet) return false;
@@ -208,15 +322,63 @@ export function Scanner({ activeSet, onHit }: Props) {
   );
 
   const tick = useCallback(async () => {
-    if (busyRef.current || pausedRef.current) return;
+    const video = videoRef.current;
+    const skip = (reason: string) => {
+      countersRef.current.skipped++;
+      setDiag((d) => ({
+        ...d,
+        framesSkipped: countersRef.current.skipped,
+        skipReason: reason,
+      }));
+    };
+    if (busyRef.current) return; // kein State-Update, sonst flackert die Anzeige
+    if (pausedRef.current) return skip('Tab im Hintergrund');
+    if (!video) return skip('kein Video-Element');
+    if (!video.videoWidth || video.readyState < 2) {
+      return skip(`Video nicht bereit (videoWidth=${video.videoWidth}, readyState=${video.readyState})`);
+    }
+
     busyRef.current = true;
     try {
+      const videoInfo = `${video.videoWidth}×${video.videoHeight}, readyState=${video.readyState}, ${
+        video.paused ? 'PAUSIERT' : 'läuft'
+      }`;
+      const brightness = updateFrameDiag(video);
+
+      let captureInfo = '–';
+      const sideResults: { left: SideDiag | null; right: SideDiag | null } = { left: null, right: null };
+      let hit = false;
+
       for (const side of ['left', 'right'] as const) {
         const crop = cropCorner(side);
-        if (!crop) continue;
+        if (!crop) {
+          sideResults[side] = { raw: '', parsed: 'Crop fehlgeschlagen (Rahmen/Video-Geometrie)', ms: 0 };
+          continue;
+        }
+        captureInfo = `${crop.width}×${crop.height}`;
+        copyToDiagCanvas(crop, side === 'left' ? diagLeftRef.current : diagRightRef.current);
+        const t0 = performance.now();
         const text = await recognizeDigits(crop);
-        if (await handleReading(text)) break;
+        const ms = Math.round(performance.now() - t0);
+        const raw = text.replace(/\s+/g, ' ').trim();
+        sideResults[side] = { raw, parsed: describeParse(raw), ms };
+        if (await handleReading(text)) {
+          hit = true;
+          break;
+        }
       }
+
+      countersRef.current.analyzed++;
+      setDiag((d) => ({
+        framesAnalyzed: countersRef.current.analyzed,
+        framesSkipped: countersRef.current.skipped,
+        skipReason: '',
+        videoInfo,
+        captureInfo,
+        brightness,
+        left: sideResults.left ?? (hit ? d.left : null),
+        right: sideResults.right ?? (hit ? d.right : null),
+      }));
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setPhase('error');
@@ -254,8 +416,9 @@ export function Scanner({ activeSet, onHit }: Props) {
         );
       }
       const video = videoRef.current;
+      if (!video || !video.videoWidth) throw new Error('Video liefert kein Bild (videoWidth=0).');
       const rect = mapRectToVideo(guide.x, guide.y, guide.w, guide.h);
-      if (!video || !rect) throw new Error('Kein Kamerabild verfügbar.');
+      if (!rect) throw new Error('Kein Kamerabild verfügbar.');
       const hash = hashImageSource(video, rect.sx, rect.sy, rect.sw, rect.sh);
       const matches = matchHash(hash, index, 3);
       setCandidates(
@@ -285,16 +448,19 @@ export function Scanner({ activeSet, onHit }: Props) {
   async function start() {
     setErrorMsg(null);
     setPhase('starting');
+    countersRef.current = { analyzed: 0, skipped: 0 };
+    setDiag(EMPTY_DIAG);
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error(
           'Kamera-API nicht verfügbar. Die Seite muss über HTTPS (oder localhost) laufen – siehe README, Abschnitt „Auf dem Tablet testen“.',
         );
       }
-      // OCR parallel zum Kamera-Start initialisieren
-      const ocrReady = initOcr((status, progress) => {
-        setOcrStatus(`OCR: ${status} ${(progress * 100).toFixed(0)} %`);
-      });
+      // OCR parallel zum Kamera-Start initialisieren; Status kommt über onOcrStatus
+      const ocrReady = initOcr();
+      // Asset-Preflight für die Diagnose (nicht blockierend)
+      checkOcrAssets().then(setAssetChecks).catch(() => {});
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
@@ -308,8 +474,9 @@ export function Scanner({ activeSet, onHit }: Props) {
       if (!video) throw new Error('Video-Element fehlt.');
       video.srcObject = stream;
       await video.play();
+      // Verdachtsfall 2: NIE auf die Canvas zeichnen, bevor das Video bereit ist
+      await waitForVideoReady(video, 8000);
       await ocrReady;
-      setOcrStatus(null);
       setPhase('scanning');
     } catch (err) {
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -326,6 +493,19 @@ export function Scanner({ activeSet, onHit }: Props) {
     }
   }
 
+  function ocrStatusLabel(s: OcrStatus): string {
+    switch (s.state) {
+      case 'idle':
+        return `nicht initialisiert (${s.detail})`;
+      case 'loading':
+        return `lädt … ${s.detail}`;
+      case 'ready':
+        return `bereit (${s.detail})`;
+      case 'error':
+        return `FEHLER: ${s.detail}`;
+    }
+  }
+
   return (
     <section className="card-section scanner">
       <h2>Scannen</h2>
@@ -338,7 +518,9 @@ export function Scanner({ activeSet, onHit }: Props) {
         </button>
       )}
 
-      {phase === 'starting' && <p className="muted">{ocrStatus ?? 'Starte Kamera …'}</p>}
+      {phase === 'starting' && (
+        <p className="muted">Starte Kamera … (OCR: {ocrStatusLabel(ocrStatus)})</p>
+      )}
 
       {errorMsg && <p className="inline-error">{errorMsg}</p>}
 
@@ -404,6 +586,74 @@ export function Scanner({ activeSet, onHit }: Props) {
             Keine davon
           </button>
         </div>
+      )}
+
+      {phase !== 'idle' && (
+        <details className="diag">
+          <summary>🔧 Diagnose</summary>
+
+          <dl className="diag-grid">
+            <dt>OCR-Engine</dt>
+            <dd className={ocrStatus.state === 'error' ? 'diag-bad' : ''}>{ocrStatusLabel(ocrStatus)}</dd>
+
+            <dt>Video-Stream</dt>
+            <dd>{diag.videoInfo}</dd>
+
+            <dt>Capture-Canvas</dt>
+            <dd>{diag.captureInfo}</dd>
+
+            <dt>Analysierte Frames</dt>
+            <dd>
+              {diag.framesAnalyzed} (übersprungen: {diag.framesSkipped}
+              {diag.skipReason ? ` — zuletzt: ${diag.skipReason}` : ''})
+            </dd>
+
+            <dt>Mittlere Helligkeit</dt>
+            <dd className={diag.brightness.includes('SCHWARZ') ? 'diag-bad' : ''}>{diag.brightness}</dd>
+
+            <dt>OCR links (roh)</dt>
+            <dd>
+              {diag.left ? (
+                <>
+                  „{diag.left.raw || '∅ leer'}“ → {diag.left.parsed} <span className="muted">({diag.left.ms} ms)</span>
+                </>
+              ) : (
+                '–'
+              )}
+            </dd>
+
+            <dt>OCR rechts (roh)</dt>
+            <dd>
+              {diag.right ? (
+                <>
+                  „{diag.right.raw || '∅ leer'}“ → {diag.right.parsed} <span className="muted">({diag.right.ms} ms)</span>
+                </>
+              ) : (
+                '–'
+              )}
+            </dd>
+          </dl>
+
+          <p className="diag-label">Letzter Frame (Capture-Vorschau):</p>
+          <canvas ref={diagFrameRef} className="diag-frame" />
+
+          <p className="diag-label">Nummernbereich links / rechts (vergrößert, nach Vorverarbeitung):</p>
+          <canvas ref={diagLeftRef} className="diag-crop" />
+          <canvas ref={diagRightRef} className="diag-crop" />
+
+          <p className="diag-label">Tesseract-Dateien (Pfad-Check):</p>
+          {assetChecks ? (
+            <ul className="diag-assets">
+              {assetChecks.map((a) => (
+                <li key={a.url} className={a.ok ? '' : 'diag-bad'}>
+                  {a.ok ? '✓' : '✗'} {a.url.split('/').slice(-1)[0]} — {a.info}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">läuft …</p>
+          )}
+        </details>
       )}
     </section>
   );
