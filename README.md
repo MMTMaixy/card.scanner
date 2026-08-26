@@ -1,7 +1,7 @@
 # Pokémon-Karten-Scanner (PWA)
 
 Karten stapelweise scannen und als CSV für das Cardmarket-Bulk-Listing
-exportieren. Läuft komplett lokal im Browser (Chrome auf Android-Tablet),
+exportieren. Läut komplett lokal im Browser (Chrome auf Android-Tablet),
 offline-fähig, installierbar, ohne Backend, ohne Kosten, ohne Anmeldung.
 
 Architektur und Entscheidungen: siehe [PLAN.md](PLAN.md).
