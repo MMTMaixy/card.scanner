@@ -7,6 +7,7 @@ import { findCardByNumber } from './logic/numberParse';
 import { BatchBar } from './components/BatchBar';
 import { SetManager } from './components/SetManager';
 import { ManualEntry } from './components/ManualEntry';
+import { Scanner } from './components/Scanner';
 import { RowList } from './components/RowList';
 import { ExportPanel } from './components/ExportPanel';
 
@@ -283,6 +284,7 @@ export default function App() {
       )}
 
       <main className="main">
+        <Scanner activeSet={activeSet} onHit={addByNumber} />
         <ManualEntry disabled={!activeSet} onSubmit={addByNumber} onUndo={undoLast} />
         <RowList rows={rows} onChange={changeRow} onRemove={removeRow} />
         <ExportPanel rows={rows} onClearAll={clearAllRows} />
