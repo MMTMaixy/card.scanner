@@ -37,6 +37,12 @@ export default function App() {
 
   const activeSet = storedSets.find((s) => s.id === batch.setId && s.lang === batch.lang);
 
+  // App ist gemountet -> Boot-Fallback aus index.html sicher entfernen
+  // (React ersetzt den #root-Inhalt ohnehin, das hier ist die explizite Garantie).
+  useEffect(() => {
+    document.getElementById('boot-fallback')?.remove();
+  }, []);
+
   // Initial aus IndexedDB laden
   useEffect(() => {
     (async () => {

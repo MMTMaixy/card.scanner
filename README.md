@@ -1,7 +1,7 @@
 # Pokémon-Karten-Scanner (PWA)
 
 Karten stapelweise scannen und als CSV für das Cardmarket-Bulk-Listing
-exportieren. Läut komplett lokal im Browser (Chrome auf Android-Tablet),
+exportieren. Läuft komplett lokal im Browser (Chrome auf Android-Tablet),
 offline-fähig, installierbar, ohne Backend, ohne Kosten, ohne Anmeldung.
 
 Architektur und Entscheidungen: siehe [PLAN.md](PLAN.md).
@@ -111,6 +111,24 @@ diesen Hinweis auch beim Export an.
 | PO | `poor` |
 
 Sprache: `de` / `en` / `ja`. Leerer Preis = Preisfeld bleibt leer.
+
+## Debuggen auf dem Tablet (ohne Browser-Konsole)
+
+- **Boot-Fallback**: Beim Laden zeigt die Seite „App startet …“. Verschwindet
+  die Meldung nicht, ist das JavaScript nie gestartet — Fehler (auch
+  fehlgeschlagene Datei-Ladevorgänge) erscheinen dann automatisch als roter
+  Text unten auf der Seite (`window.onerror` + `unhandledrejection` +
+  Ressourcen-Fehler sind global abgefangen; React-Abstürze fängt eine
+  ErrorBoundary).
+- **Echte Konsole**: Seite mit `?debug=1` öffnen, z. B.
+  `https://mmtmaixy.github.io/card.scanner/?debug=1` — dann erscheint unten
+  rechts der [eruda](https://github.com/liriliri/eruda)-Button mit
+  vollwertiger Konsole, Netzwerk-Tab usw. (lokal gebündelt, lädt auch dann,
+  wenn das App-Bundle kaputt ist).
+- **Seite bleibt komplett weiß, ohne „App startet …“?** Dann liefert GitHub
+  Pages nicht den Build aus, sondern etwas anderes (oder nichts): In den
+  Repo-Einstellungen unter *Pages* muss als *Source* **„GitHub Actions“**
+  gewählt sein — nicht „Deploy from a branch“.
 
 ## Entwicklung
 

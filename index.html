@@ -5,9 +5,100 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#1a1d24" />
     <title>Karten-Scanner</title>
+    <script>
+      // Boot-Diagnose: läuft als klassisches Inline-Script VOR dem App-Bundle
+      // und funktioniert deshalb auch, wenn das Bundle gar nicht lädt.
+      // Kein Modul-Syntax, damit es auch auf älteren Browsern ausführbar ist.
+      (function () {
+        function show(msg) {
+          try {
+            var box = document.getElementById('boot-errors');
+            if (!box) {
+              box = document.createElement('div');
+              box.id = 'boot-errors';
+              box.style.cssText =
+                'position:fixed;left:0;right:0;bottom:0;max-height:45vh;overflow:auto;' +
+                'background:#5a1f1f;color:#fff;font:13px/1.5 ui-monospace,monospace;' +
+                'padding:10px 12px;white-space:pre-wrap;word-break:break-word;' +
+                'z-index:99999;border-top:3px solid #d9534f';
+              (document.body || document.documentElement).appendChild(box);
+            }
+            var line = document.createElement('div');
+            line.style.marginBottom = '6px';
+            line.textContent = '⚠ ' + msg;
+            box.appendChild(line);
+          } catch (e) {
+            /* nichts mehr zu retten */
+          }
+        }
+        window.__showBootError = show;
+
+        // Fängt Laufzeitfehler UND (per Capture-Phase) Ladefehler von
+        // Ressourcen — z. B. ein 404 auf das App-Bundle oder die CSS-Datei.
+        window.addEventListener(
+          'error',
+          function (ev) {
+            var t = ev && ev.target;
+            if (t && t !== window && (t.src || t.href)) {
+              show('Datei konnte nicht geladen werden: ' + (t.src || t.href));
+            } else if (ev && ev.message) {
+              show(
+                ev.message +
+                  (ev.filename ? '\n    in ' + ev.filename + ':' + ev.lineno + ':' + ev.colno : ''),
+              );
+            }
+          },
+          true,
+        );
+        window.addEventListener('unhandledrejection', function (ev) {
+          var r = ev && ev.reason;
+          show('Unbehandelter Fehler (Promise): ' + ((r && (r.stack || r.message)) || String(r)));
+        });
+
+        // Mobile Debug-Konsole (eruda): Seite mit ?debug=1 öffnen.
+        // Wird bewusst hier (nicht im App-Bundle) geladen, damit die Konsole
+        // auch dann verfügbar ist, wenn die App selbst nicht startet.
+        try {
+          if (/[?&]debug=1(&|$)/.test(location.search)) {
+            var s = document.createElement('script');
+            s.src = 'eruda.js';
+            s.onload = function () {
+              try {
+                window.eruda.init();
+              } catch (e) {
+                show('eruda.init fehlgeschlagen: ' + e);
+              }
+            };
+            s.onerror = function () {
+              show('eruda.js konnte nicht geladen werden (Pfad ' + s.src + ').');
+            };
+            document.head.appendChild(s);
+          }
+        } catch (e) {
+          show(String(e));
+        }
+      })();
+    </script>
   </head>
-  <body>
-    <div id="root"></div>
+  <body style="margin: 0; background: #14161b">
+    <div id="root">
+      <!-- Sichtbares Boot-Fallback: wird von React beim erfolgreichen Mount
+           ersetzt. Bleibt es stehen, ist das JavaScript nie gestartet. -->
+      <div id="boot-fallback" style="font-family: system-ui, sans-serif; color: #e8eaf0; padding: 24px">
+        <h1 style="font-size: 1.2rem; margin: 0 0 8px">Karten-Scanner</h1>
+        <p style="margin: 0 0 12px">App startet …</p>
+        <p style="color: #9aa3b5; font-size: 0.9rem; max-width: 40em">
+          Wenn diese Meldung nicht nach wenigen Sekunden verschwindet, wurde das JavaScript nicht
+          geladen oder ist beim Start abgestürzt — Fehler erscheinen dann unten als roter Text.
+          Für eine vollständige Konsole die Seite mit <code>?debug=1</code> öffnen.
+        </p>
+      </div>
+    </div>
+    <noscript>
+      <p style="font-family: system-ui, sans-serif; color: #e8eaf0; padding: 24px">
+        Diese App braucht JavaScript — bitte in den Browser-Einstellungen aktivieren.
+      </p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
