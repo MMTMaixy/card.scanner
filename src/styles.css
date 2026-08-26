@@ -414,8 +414,24 @@ select {
   pointer-events: none;
 }
 
-.scanner-stop {
+.scanner-actions {
+  display: flex;
+  gap: 10px;
   margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.candidates {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.candidates p {
+  width: 100%;
+  margin: 0 0 4px;
 }
 
 .storage-info {

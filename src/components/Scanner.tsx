@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { initOcr, recognizeDigits } from '../ocr/ocr';
 import { normalizeLocalId, parseScanText, scanMatchesSet } from '../logic/numberParse';
+import { hashImageSource } from '../phash/dhash';
+import { buildHashIndex, loadHashIndex, matchHash } from '../phash/matcher';
 import type { SetInfo } from '../types';
 
 interface Props {
@@ -23,6 +25,9 @@ export function Scanner({ activeSet, onHit }: Props) {
   const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [flash, setFlash] = useState<'ok' | null>(null);
   const [guide, setGuide] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [indexProgress, setIndexProgress] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<{ localId: string; distance: number; name: string }[] | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -95,35 +100,46 @@ export function Scanner({ activeSet, onHit }: Props) {
     }
   }
 
+  /** object-fit: cover — rechnet ein Rechteck in Container-Koordinaten in Video-Pixel um. */
+  function mapRectToVideo(
+    cx: number,
+    cy: number,
+    cw2: number,
+    ch2: number,
+  ): { sx: number; sy: number; sw: number; sh: number } | null {
+    const video = videoRef.current;
+    const container = containerRef.current;
+    if (!video || !container || !video.videoWidth) return null;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const scale = Math.max(cw / vw, ch / vh);
+    const ox = (vw * scale - cw) / 2;
+    const oy = (vh * scale - ch) / 2;
+    const x0 = Math.max(0, (cx + ox) / scale);
+    const y0 = Math.max(0, (cy + oy) / scale);
+    const x1 = Math.min(vw, (cx + cw2 + ox) / scale);
+    const y1 = Math.min(vh, (cy + ch2 + oy) / scale);
+    if (x1 - x0 < 10 || y1 - y0 < 10) return null;
+    return { sx: x0, sy: y0, sw: x1 - x0, sh: y1 - y0 };
+  }
+
   /**
    * Schneidet eine Ecke des Führungsrahmens aus dem Videobild, skaliert hoch
    * und verstärkt den Kontrast (Graustufen + Spreizung) für die OCR.
    */
   function cropCorner(side: 'left' | 'right'): HTMLCanvasElement | null {
     const video = videoRef.current;
-    const container = containerRef.current;
-    if (!video || !container || !guide || !video.videoWidth) return null;
-
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    // object-fit: cover -> Umrechnung Container-Koordinaten -> Video-Pixel
-    const scale = Math.max(cw / vw, ch / vh);
-    const ox = (vw * scale - cw) / 2;
-    const oy = (vh * scale - ch) / 2;
-    const toVideo = (cx: number, cy: number) => ({ x: (cx + ox) / scale, y: (cy + oy) / scale });
+    if (!video || !guide) return null;
 
     const cropW = 0.46 * guide.w;
     const cropH = 0.13 * guide.h;
     const cx = side === 'left' ? guide.x : guide.x + guide.w - cropW;
     const cy = guide.y + guide.h - cropH;
-    const p0 = toVideo(cx, cy);
-    const p1 = toVideo(cx + cropW, cy + cropH);
-    const sx = Math.max(0, p0.x);
-    const sy = Math.max(0, p0.y);
-    const sw = Math.min(vw, p1.x) - sx;
-    const sh = Math.min(vh, p1.y) - sy;
+    const rect = mapRectToVideo(cx, cy, cropW, cropH);
+    if (!rect) return null;
+    const { sx, sy, sw, sh } = rect;
     if (sw < 20 || sh < 10) return null;
 
     const upscale = Math.min(2.5, Math.max(1.5, 640 / sw));
@@ -219,6 +235,52 @@ export function Scanner({ activeSet, onHit }: Props) {
     timerRef.current = id;
     return () => clearInterval(id);
   }, [phase, tick]);
+
+  /**
+   * pHash-Fallback für Karten ohne (lesbare) moderne Sammlernummer:
+   * aktuelles Kamerabild im Rahmen hashen und gegen den Bild-Index des Sets
+   * vergleichen. Nie automatisch übernehmen — nur Kandidaten vorschlagen.
+   */
+  async function photoMatch() {
+    if (!activeSet || !guide) return;
+    setCandidates(null);
+    setPhotoBusy(true);
+    setErrorMsg(null);
+    try {
+      let index = await loadHashIndex(activeSet.id);
+      if (!index) {
+        index = await buildHashIndex(activeSet, (done, total) =>
+          setIndexProgress(`Bild-Index wird einmalig geladen: ${done}/${total} …`),
+        );
+      }
+      const video = videoRef.current;
+      const rect = mapRectToVideo(guide.x, guide.y, guide.w, guide.h);
+      if (!video || !rect) throw new Error('Kein Kamerabild verfügbar.');
+      const hash = hashImageSource(video, rect.sx, rect.sy, rect.sw, rect.sh);
+      const matches = matchHash(hash, index, 3);
+      setCandidates(
+        matches.map((m) => ({
+          ...m,
+          name: activeSet.cards.find((c) => c.localId === m.localId)?.nameLocal ?? '?',
+        })),
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPhotoBusy(false);
+      setIndexProgress(null);
+    }
+  }
+
+  async function pickCandidate(localId: string) {
+    const ok = await onHit(localId);
+    if (ok) {
+      beep();
+      setFlash('ok');
+      setTimeout(() => setFlash(null), 450);
+      setCandidates(null);
+    }
+  }
 
   async function start() {
     setErrorMsg(null);
@@ -319,9 +381,29 @@ export function Scanner({ activeSet, onHit }: Props) {
       </div>
 
       {phase === 'scanning' && (
-        <button onClick={stop} className="scanner-stop">
-          Kamera stoppen
-        </button>
+        <div className="scanner-actions">
+          <button onClick={() => void photoMatch()} disabled={photoBusy}>
+            {photoBusy ? (indexProgress ?? 'Vergleiche Bild …') : '🔍 Foto-Abgleich (ohne Nummer)'}
+          </button>
+          <button onClick={stop} className="scanner-stop">
+            Kamera stoppen
+          </button>
+        </div>
+      )}
+
+      {candidates && (
+        <div className="candidates">
+          <p>Ähnlichste Karten im Set — passende antippen:</p>
+          {candidates.map((c) => (
+            <button key={c.localId} className="chip" onClick={() => void pickCandidate(c.localId)}>
+              #{c.localId} {c.name}
+              <span className="muted"> (Abstand {c.distance})</span>
+            </button>
+          ))}
+          <button className="chip chip-outline" onClick={() => setCandidates(null)}>
+            Keine davon
+          </button>
+        </div>
       )}
     </section>
   );
