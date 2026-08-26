@@ -65,12 +65,12 @@ Darum blockt die gelbe Markierung nie hart: du kannst per Tap korrigieren
 * Set-Liste: `GET /v2/{lang}/sets` (klein, wird gecacht).
 * Karten eines Sets **mit** `variants`: Der REST-Listen-Endpoint
   (`/v2/{lang}/cards?set=…`) liefert nur Kurzform ohne `variants`
-  (im Server-Code verifiziert). Deshalb zweistufig:
-  1. **GraphQL** (`POST /v2/graphql`): eine Anfrage für alle Karten des Sets
-     inkl. `variants`.
-  2. **Fallback REST-Fanout**: `GET /v2/{lang}/cards/{id}` pro Karte
-     (parallel, ~8 gleichzeitig, mit Fortschrittsanzeige). Garantiert
-     funktionsfähig, nur langsamer (einmalig pro Set).
+  (im Server-Code verifiziert). Umsetzung: **REST-Fanout** —
+  `GET /v2/{lang}/cards/{id}` pro Karte, 8 parallel, mit
+  Fortschrittsanzeige. Einmalig pro Set, danach offline aus IndexedDB.
+  (Die TCGdex-GraphQL-API könnte das in einer Anfrage, aber ihre
+  Filter-Syntax ließ sich im Servercode nicht zweifelsfrei verifizieren —
+  der Fanout ist der garantiert funktionierende Weg.)
 * Englische Namen werden zusätzlich zur gewählten Sprache geladen (eine
   Kurzlisten-Anfrage), weil Cardmarket-Produktnamen englisch sind — die CSV
   enthält beide Spalten (`Name` = EN fürs Matching, `Local Name` = z. B. DE).

@@ -20,6 +20,18 @@ export function SetManager({ lang, storedSets, activeSetId, onSelect, onStored, 
   const [search, setSearch] = useState('');
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<SetDownloadProgress | null>(null);
+  const [storageInfo, setStorageInfo] = useState<string | null>(null);
+
+  useEffect(() => {
+    navigator.storage
+      ?.estimate?.()
+      .then((est) => {
+        if (est.usage != null) {
+          setStorageInfo(`Lokaler Speicher: ${(est.usage / 1024 / 1024).toFixed(1)} MB belegt`);
+        }
+      })
+      .catch(() => {});
+  }, [storedSets]);
 
   const storedForLang = useMemo(
     () => storedSets.filter((s) => s.lang === lang).sort((a, b) => b.fetchedAt - a.fetchedAt),
@@ -164,6 +176,8 @@ export function SetManager({ lang, storedSets, activeSetId, onSelect, onStored, 
             <p className="muted">{filtered.length - 60} weitere – Suche verfeinern.</p>
           )}
         </section>
+
+        {storageInfo && <p className="muted storage-info">{storageInfo}</p>}
       </div>
     </div>
   );
