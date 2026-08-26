@@ -8,6 +8,17 @@ import {
   type AssetCheck,
   type OcrStatus,
 } from '../ocr/ocr';
+import {
+  cvIfReady,
+  detectCardQuad,
+  extractNumberStrip,
+  getCvStatus,
+  initCv,
+  onCvStatus,
+  warpCard,
+  type CvStatus,
+} from '../vision/cardDetect';
+import { maxCornerDelta, scaleQuad, WARP_H, WARP_W, type Pt } from '../vision/quad';
 import { normalizeLocalId, parseScanText, scanMatchesSet } from '../logic/numberParse';
 import { hashImageSource } from '../phash/dhash';
 import { buildHashIndex, loadHashIndex, matchHash } from '../phash/matcher';
@@ -20,14 +31,24 @@ interface Props {
 }
 
 type Phase = 'idle' | 'starting' | 'scanning' | 'error';
+type Quad = [Pt, Pt, Pt, Pt];
 
-const SCAN_INTERVAL_MS = 320;
+/** Erkennungs-Takt: Konturensuche ist billig (verkleinerter Frame). */
+const DETECT_INTERVAL_MS = 140;
+/** Breite des Frames für die Konturensuche. */
+const DETECT_W = 480;
+/** Frames für die OCR-Quelle (Entzerrung) — Kompromiss Qualität/Tempo. */
+const WORK_W = 1280;
+/** Mindest-Schärfe (Varianz des Laplace) — darunter keine OCR. */
+const SHARPNESS_MIN = 45;
+/** So viele stabile Frames in Folge, bevor die OCR startet. */
+const STABLE_N = 2;
+/** Max. Eckverschiebung (Anteil der Framebreite), die noch als stabil gilt. */
+const STABLE_DELTA = 0.025;
 /** Sperre gegen Doppelzählung; wird verlängert, solange die Karte im Bild liegt. */
 const LOCK_MS = 2000;
 /** Zwei übereinstimmende Lesungen innerhalb dieses Fensters = Treffer. */
 const CONSENSUS_WINDOW_MS = 2200;
-/** Höhe der Nummern-Ausschnitte als Anteil des Führungsrahmens. */
-const CORNER_H = 0.18;
 
 interface SideDiag {
   raw: string;
@@ -37,10 +58,12 @@ interface SideDiag {
 
 interface DiagInfo {
   framesAnalyzed: number;
-  framesSkipped: number;
-  skipReason: string;
+  ocrRuns: number;
+  rejects: Record<string, number>;
   videoInfo: string;
   captureInfo: string;
+  sharpness: string;
+  detect: string;
   brightness: string;
   left: SideDiag | null;
   right: SideDiag | null;
@@ -48,14 +71,23 @@ interface DiagInfo {
 
 const EMPTY_DIAG: DiagInfo = {
   framesAnalyzed: 0,
-  framesSkipped: 0,
-  skipReason: '',
+  ocrRuns: 0,
+  rejects: {},
   videoInfo: '–',
   captureInfo: '–',
+  sharpness: '–',
+  detect: '–',
   brightness: '–',
   left: null,
   right: null,
 };
+
+interface CameraDevice {
+  deviceId: string;
+  label: string;
+}
+
+const CAMERA_STORAGE_KEY = 'scanner.cameraId';
 
 /**
  * Wartet, bis das Video wirklich Bilder liefert: loadedmetadata ist gefeuert
@@ -91,31 +123,44 @@ export function Scanner({ activeSet, onHit }: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [flash, setFlash] = useState<'ok' | null>(null);
-  const [guide, setGuide] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [indexProgress, setIndexProgress] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<{ localId: string; distance: number; name: string }[] | null>(null);
   const [ocrStatus, setOcrStatus] = useState<OcrStatus>(getOcrStatus());
+  const [cvStatus, setCvStatus] = useState<CvStatus>(getCvStatus());
   const [assetChecks, setAssetChecks] = useState<AssetCheck[] | null>(null);
   const [diag, setDiag] = useState<DiagInfo>(EMPTY_DIAG);
+  const [devices, setDevices] = useState<CameraDevice[]>([]);
+  const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const busyRef = useRef(false);
+  const ocrBusyRef = useRef(false);
   const pendingRef = useRef<{ key: string; count: number; ts: number } | null>(null);
   const locksRef = useRef(new Map<string, number>());
   const audioRef = useRef<AudioContext | null>(null);
-  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pausedRef = useRef(false);
-  const countersRef = useRef({ analyzed: 0, skipped: 0 });
+  const detCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const workCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const countersRef = useRef({ analyzed: 0, ocrRuns: 0, rejects: {} as Record<string, number> });
+  const lastQuadRef = useRef<Quad | null>(null);
+  const stableCountRef = useRef(0);
+  const lastDiagTsRef = useRef(0);
+  const lastFrameDiagTsRef = useRef(0);
+  const brightnessRef = useRef('–');
   const diagFrameRef = useRef<HTMLCanvasElement>(null);
   const diagLeftRef = useRef<HTMLCanvasElement>(null);
   const diagRightRef = useRef<HTMLCanvasElement>(null);
+  const sideDiagRef = useRef<{ left: SideDiag | null; right: SideDiag | null }>({ left: null, right: null });
+  const captureInfoRef = useRef('–');
 
-  // OCR-Ladestatus live anzeigen (initialisiert / lädt / Fehler)
   useEffect(() => onOcrStatus(setOcrStatus), []);
+  useEffect(() => onCvStatus(setCvStatus), []);
 
   const stop = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -123,33 +168,13 @@ export function Scanner({ activeSet, onHit }: Props) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     pendingRef.current = null;
-    busyRef.current = false;
+    ocrBusyRef.current = false;
+    lastQuadRef.current = null;
+    setTorchOn(false);
     setPhase('idle');
   }, []);
 
   useEffect(() => stop, [stop]);
-
-  // Führungsrahmen an Containergröße anpassen (gleiche Formel wie der Crop!)
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => {
-      const w = el.clientWidth;
-      const h = el.clientHeight;
-      if (!w || !h) return;
-      let gw = 0.74 * w;
-      let gh = (gw * 88) / 63;
-      if (gh > 0.86 * h) {
-        gh = 0.86 * h;
-        gw = (gh * 63) / 88;
-      }
-      setGuide({ x: (w - gw) / 2, y: (h - gh) / 2, w: gw, h: gh });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [phase]);
 
   // Bei verstecktem Tab pausieren
   useEffect(() => {
@@ -176,89 +201,60 @@ export function Scanner({ activeSet, onHit }: Props) {
     }
   }
 
-  /** object-fit: cover — rechnet ein Rechteck in Container-Koordinaten in Video-Pixel um. */
-  function mapRectToVideo(
-    cx: number,
-    cy: number,
-    cw2: number,
-    ch2: number,
-  ): { sx: number; sy: number; sw: number; sh: number } | null {
-    const video = videoRef.current;
+  function reject(reason: string) {
+    countersRef.current.rejects[reason] = (countersRef.current.rejects[reason] ?? 0) + 1;
+  }
+
+  /** Erkannten Kartenumriss (Detektions-Koordinaten) farbig ins Livebild zeichnen. */
+  function drawOverlay(quad: Quad | null, detW: number) {
+    const canvas = overlayRef.current;
     const container = containerRef.current;
-    if (!video || !container || !video.videoWidth) return null;
+    const video = videoRef.current;
+    if (!canvas || !container || !video) return;
     const cw = container.clientWidth;
     const ch = container.clientHeight;
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const scale = Math.max(cw / vw, ch / vh);
-    const ox = (vw * scale - cw) / 2;
-    const oy = (vh * scale - ch) / 2;
-    const x0 = Math.max(0, (cx + ox) / scale);
-    const y0 = Math.max(0, (cy + oy) / scale);
-    const x1 = Math.min(vw, (cx + cw2 + ox) / scale);
-    const y1 = Math.min(vh, (cy + ch2 + oy) / scale);
-    if (x1 - x0 < 10 || y1 - y0 < 10) return null;
-    return { sx: x0, sy: y0, sw: x1 - x0, sh: y1 - y0 };
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cw, ch);
+    if (!quad || !video.videoWidth) return;
+
+    // Detektions-Koordinaten -> Video -> Container (object-fit: cover)
+    const toVideo = video.videoWidth / detW;
+    const s = Math.max(cw / video.videoWidth, ch / video.videoHeight);
+    const ox = (video.videoWidth * s - cw) / 2;
+    const oy = (video.videoHeight * s - ch) / 2;
+    const pts = quad.map((p) => ({ x: p.x * toVideo * s - ox, y: p.y * toVideo * s - oy }));
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#ffe14d';
+    ctx.shadowColor = 'rgba(255, 225, 77, 0.55)';
+    ctx.shadowBlur = 14;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
   }
 
-  /**
-   * Schneidet eine Ecke des Führungsrahmens aus dem Videobild, skaliert hoch
-   * und verstärkt den Kontrast (Graustufen + Spreizung) für die OCR.
-   */
-  function cropCorner(side: 'left' | 'right'): HTMLCanvasElement | null {
-    const video = videoRef.current;
-    if (!video || !guide) return null;
-
-    // 18 % Höhe statt 13 %: verzeiht, wenn die Karte nicht exakt am unteren
-    // Rahmenrand liegt (die Nummer wurde sonst nur knapp erwischt).
-    const cropW = 0.46 * guide.w;
-    const cropH = CORNER_H * guide.h;
-    const cx = side === 'left' ? guide.x : guide.x + guide.w - cropW;
-    const cy = guide.y + guide.h - cropH;
-    const rect = mapRectToVideo(cx, cy, cropW, cropH);
-    if (!rect) return null;
-    const { sx, sy, sw, sh } = rect;
-    if (sw < 20 || sh < 10) return null;
-
-    const upscale = Math.min(2.5, Math.max(1.5, 640 / sw));
-    const canvas = (cropCanvasRef.current ??= document.createElement('canvas'));
-    canvas.width = Math.round(sw * upscale);
-    canvas.height = Math.round(sh * upscale);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-
-    // Graustufen + Kontrastspreizung
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = img.data;
-    let min = 255;
-    let max = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
-      d[i] = g;
-      if (g < min) min = g;
-      if (g > max) max = g;
-    }
-    const range = Math.max(1, max - min);
-    for (let i = 0; i < d.length; i += 4) {
-      const g = Math.round(((d[i] - min) / range) * 255);
-      d[i] = d[i + 1] = d[i + 2] = g;
-    }
-    ctx.putImageData(img, 0, 0);
-    return canvas;
-  }
-
-  /** Diagnose: Frame-Vorschau zeichnen und mittlere Helligkeit bestimmen. */
-  function updateFrameDiag(video: HTMLVideoElement): string {
+  /** Diagnose: Frame-Vorschau + mittlere Helligkeit (throttled). */
+  function updateFrameDiag(video: HTMLVideoElement) {
+    const now = Date.now();
+    if (now - lastFrameDiagTsRef.current < 600) return;
+    lastFrameDiagTsRef.current = now;
     const canvas = diagFrameRef.current;
-    if (!canvas) return '–';
+    if (!canvas) return;
     const w = 320;
     const h = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * w));
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return '–';
+    if (!ctx) return;
     ctx.drawImage(video, 0, 0, w, h);
     const data = ctx.getImageData(0, 0, w, h).data;
     let sum = 0;
@@ -268,8 +264,8 @@ export function Scanner({ activeSet, onHit }: Props) {
       n++;
     }
     const mean = n ? sum / n : 0;
-    if (mean < 3) return `${mean.toFixed(1)} — Frame ist SCHWARZ, Capture liefert keine Bilder!`;
-    return mean.toFixed(1);
+    brightnessRef.current =
+      mean < 3 ? `${mean.toFixed(1)} — Frame ist SCHWARZ, Capture liefert keine Bilder!` : mean.toFixed(1);
   }
 
   function copyToDiagCanvas(src: HTMLCanvasElement, dest: HTMLCanvasElement | null) {
@@ -287,6 +283,24 @@ export function Scanner({ activeSet, onHit }: Props) {
     return `gelesen ${parsed.numerator}/${parsed.denominator} — Nenner ${
       fits ? 'passt' : `passt NICHT (erwartet ${activeSet.officialCount})`
     }`;
+  }
+
+  function pushDiag(sharpness: number | null, detect: string, videoInfo: string) {
+    const now = Date.now();
+    if (now - lastDiagTsRef.current < 300) return;
+    lastDiagTsRef.current = now;
+    setDiag({
+      framesAnalyzed: countersRef.current.analyzed,
+      ocrRuns: countersRef.current.ocrRuns,
+      rejects: { ...countersRef.current.rejects },
+      videoInfo,
+      captureInfo: captureInfoRef.current,
+      sharpness: sharpness == null ? '–' : `${sharpness.toFixed(0)} (Minimum ${SHARPNESS_MIN})`,
+      detect,
+      brightness: brightnessRef.current,
+      left: sideDiagRef.current.left,
+      right: sideDiagRef.current.right,
+    });
   }
 
   const handleReading = useCallback(
@@ -325,90 +339,258 @@ export function Scanner({ activeSet, onHit }: Props) {
     [activeSet, onHit],
   );
 
-  const tick = useCallback(async () => {
+  /** OCR auf der entzerrten Karte (läuft asynchron neben der Erkennungsschleife). */
+  const runOcr = useCallback(
+    async (quadDet: Quad, detW: number) => {
+      const video = videoRef.current;
+      const cv = cvIfReady();
+      if (!video || !cv) return;
+      ocrBusyRef.current = true;
+      try {
+        const ww = Math.min(WORK_W, video.videoWidth);
+        const wh = Math.round((video.videoHeight / video.videoWidth) * ww);
+        const work = (workCanvasRef.current ??= document.createElement('canvas'));
+        work.width = ww;
+        work.height = wh;
+        const ctx = work.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, ww, wh);
+
+        const quadWork = scaleQuad(quadDet, ww / detW);
+        const warped = warpCard(cv, work, quadWork);
+
+        countersRef.current.ocrRuns++;
+        for (const side of ['left', 'right'] as const) {
+          const strip = extractNumberStrip(cv, warped, side);
+          captureInfoRef.current = `Karte ${WARP_W}×${WARP_H}, Streifen ${strip.width}×${strip.height} (CLAHE)`;
+          copyToDiagCanvas(strip, side === 'left' ? diagLeftRef.current : diagRightRef.current);
+          const t0 = performance.now();
+          const text = await recognizeDigits(strip);
+          const ms = Math.round(performance.now() - t0);
+          const raw = text.replace(/\s+/g, ' ').trim();
+          sideDiagRef.current[side] = { raw, parsed: describeParse(raw), ms };
+          if (await handleReading(text)) break;
+        }
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      } finally {
+        ocrBusyRef.current = false;
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [handleReading],
+  );
+
+  /** Erkennungsschleife: Kontur suchen, Overlay zeichnen, Gating, ggf. OCR anstoßen. */
+  const detectTick = useCallback(() => {
     const video = videoRef.current;
-    const skip = (reason: string) => {
-      countersRef.current.skipped++;
-      setDiag((d) => ({
-        ...d,
-        framesSkipped: countersRef.current.skipped,
-        skipReason: reason,
-      }));
-    };
-    if (busyRef.current) return; // kein State-Update, sonst flackert die Anzeige
-    if (pausedRef.current) return skip('Tab im Hintergrund');
-    if (!video) return skip('kein Video-Element');
-    if (!video.videoWidth || video.readyState < 2) {
-      return skip(`Video nicht bereit (videoWidth=${video.videoWidth}, readyState=${video.readyState})`);
+    const videoInfo = video?.videoWidth
+      ? `${video.videoWidth}×${video.videoHeight}, readyState=${video.readyState}, ${video.paused ? 'PAUSIERT' : 'läuft'}`
+      : '–';
+
+    if (pausedRef.current) return;
+    if (!video || !video.videoWidth || video.readyState < 2) {
+      reject('Video nicht bereit');
+      pushDiag(null, '–', videoInfo);
+      return;
+    }
+    const cv = cvIfReady();
+    if (!cv) {
+      reject('OpenCV lädt noch');
+      pushDiag(null, '–', videoInfo);
+      return;
     }
 
-    busyRef.current = true;
+    const detW = DETECT_W;
+    const detH = Math.round((video.videoHeight / video.videoWidth) * detW);
+    const det = (detCanvasRef.current ??= document.createElement('canvas'));
+    det.width = detW;
+    det.height = detH;
+    const ctx = det.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, detW, detH);
+    const imageData = ctx.getImageData(0, 0, detW, detH);
+
+    let result;
     try {
-      const videoInfo = `${video.videoWidth}×${video.videoHeight}, readyState=${video.readyState}, ${
-        video.paused ? 'PAUSIERT' : 'läuft'
-      }`;
-      const brightness = updateFrameDiag(video);
+      result = detectCardQuad(cv, imageData);
+    } catch (err) {
+      reject('OpenCV-Fehler');
+      setErrorMsg(`Kartenerkennung fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
 
-      let captureInfo = '–';
-      const sideResults: { left: SideDiag | null; right: SideDiag | null } = { left: null, right: null };
-      let hit = false;
+    countersRef.current.analyzed++;
+    updateFrameDiag(video);
+    drawOverlay(result.quad, detW);
 
-      for (const side of ['left', 'right'] as const) {
-        const crop = cropCorner(side);
-        if (!crop) {
-          sideResults[side] = { raw: '', parsed: 'Crop fehlgeschlagen (Rahmen/Video-Geometrie)', ms: 0 };
-          continue;
-        }
-        captureInfo = `${crop.width}×${crop.height}`;
-        copyToDiagCanvas(crop, side === 'left' ? diagLeftRef.current : diagRightRef.current);
-        const t0 = performance.now();
-        const text = await recognizeDigits(crop);
-        const ms = Math.round(performance.now() - t0);
-        const raw = text.replace(/\s+/g, ' ').trim();
-        sideResults[side] = { raw, parsed: describeParse(raw), ms };
-        if (await handleReading(text)) {
-          hit = true;
-          break;
-        }
+    let detectMsg: string;
+    if (!result.quad) {
+      stableCountRef.current = 0;
+      lastQuadRef.current = null;
+      reject(result.rejectReason ? `keine Karte (${result.rejectReason})` : 'keine Karte');
+      detectMsg = result.rejectReason ? `keine Karte (${result.rejectReason})` : 'keine Karte im Bild';
+    } else {
+      // Stabilität: Ecken dürfen sich kaum bewegen
+      const prev = lastQuadRef.current;
+      lastQuadRef.current = result.quad;
+      if (prev && maxCornerDelta(prev, result.quad) <= STABLE_DELTA * detW) {
+        stableCountRef.current++;
+      } else {
+        stableCountRef.current = 0;
       }
 
-      countersRef.current.analyzed++;
-      setDiag((d) => ({
-        framesAnalyzed: countersRef.current.analyzed,
-        framesSkipped: countersRef.current.skipped,
-        skipReason: '',
-        videoInfo,
-        captureInfo,
-        brightness,
-        left: sideResults.left ?? (hit ? d.left : null),
-        right: sideResults.right ?? (hit ? d.right : null),
-      }));
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setPhase('error');
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
-    } finally {
-      busyRef.current = false;
+      if (result.sharpness < SHARPNESS_MIN) {
+        reject('unscharf');
+        detectMsg = 'Karte erkannt, aber unscharf';
+      } else if (stableCountRef.current < STABLE_N) {
+        reject('instabil (Bewegung)');
+        detectMsg = 'Karte erkannt, wartet auf ruhiges Bild';
+      } else if (ocrBusyRef.current) {
+        reject('OCR beschäftigt');
+        detectMsg = 'Karte stabil, OCR läuft bereits';
+      } else {
+        detectMsg = 'Karte stabil → OCR';
+        void runOcr(result.quad, detW);
+      }
     }
+    pushDiag(result.sharpness, detectMsg, videoInfo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handleReading, guide]);
+  }, [runOcr]);
 
-  // Laufender Scan-Loop
+  // Laufende Erkennungsschleife
   useEffect(() => {
     if (phase !== 'scanning') return;
-    const id = setInterval(() => void tick(), SCAN_INTERVAL_MS);
+    const id = setInterval(detectTick, DETECT_INTERVAL_MS);
     timerRef.current = id;
     return () => clearInterval(id);
-  }, [phase, tick]);
+  }, [phase, detectTick]);
+
+  /** Stream anfordern: gewünschte Kamera, 10 fps (längere Belichtung bei wenig Licht). */
+  async function acquireStream(deviceId: string | null): Promise<MediaStream> {
+    return navigator.mediaDevices.getUserMedia({
+      video: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 10 },
+      },
+      audio: false,
+    });
+  }
+
+  async function attachStream(stream: MediaStream) {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = stream;
+    const video = videoRef.current;
+    if (!video) throw new Error('Video-Element fehlt.');
+    video.srcObject = stream;
+    await video.play();
+    // Verdachtsfall aus der Praxis: NIE zeichnen, bevor das Video bereit ist
+    await waitForVideoReady(video, 8000);
+
+    const track = stream.getVideoTracks()[0];
+    setCurrentDeviceId(track.getSettings().deviceId ?? null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps: any = track.getCapabilities?.() ?? {};
+    setTorchSupported(!!caps.torch);
+    setTorchOn(false);
+
+    // Kameraliste (Labels gibt es erst nach erteilter Berechtigung)
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      setDevices(
+        all
+          .filter((d) => d.kind === 'videoinput')
+          .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Kamera ${i + 1}` })),
+      );
+    } catch {
+      // Liste ist optional
+    }
+  }
+
+  async function switchCamera(deviceId: string) {
+    try {
+      localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+    } catch {
+      // Speicherung optional
+    }
+    try {
+      const stream = await acquireStream(deviceId);
+      await attachStream(stream);
+    } catch (err) {
+      setErrorMsg(`Kamerawechsel fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function toggleTorch() {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await track.applyConstraints({ advanced: [{ torch: next } as any] });
+      setTorchOn(next);
+    } catch (err) {
+      setErrorMsg(`Taschenlampe nicht schaltbar: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function start() {
+    setErrorMsg(null);
+    setPhase('starting');
+    countersRef.current = { analyzed: 0, ocrRuns: 0, rejects: {} };
+    sideDiagRef.current = { left: null, right: null };
+    captureInfoRef.current = '–';
+    setDiag(EMPTY_DIAG);
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error(
+          'Kamera-API nicht verfügbar. Die Seite muss über HTTPS (oder localhost) laufen – siehe README, Abschnitt „Auf dem Tablet testen“.',
+        );
+      }
+      // OCR + OpenCV parallel zum Kamera-Start laden; Status kommt über Listener
+      const ocrReady = initOcr();
+      const cvReady = initCv();
+      checkOcrAssets().then(setAssetChecks).catch(() => {});
+
+      let savedId: string | null = null;
+      try {
+        savedId = localStorage.getItem(CAMERA_STORAGE_KEY);
+      } catch {
+        // egal
+      }
+      let stream: MediaStream;
+      try {
+        stream = await acquireStream(savedId);
+      } catch {
+        // Gespeicherte Kamera existiert nicht mehr -> Standard
+        stream = await acquireStream(null);
+      }
+      await attachStream(stream);
+      await Promise.all([ocrReady, cvReady]);
+      setPhase('scanning');
+    } catch (err) {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      let msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof DOMException && err.name === 'NotAllowedError') {
+        msg =
+          'Kamera-Zugriff wurde verweigert. In Chrome: Schloss-Symbol in der Adressleiste → Berechtigungen → Kamera erlauben, dann neu versuchen.';
+      } else if (err instanceof DOMException && err.name === 'NotFoundError') {
+        msg = 'Keine Kamera gefunden.';
+      }
+      setErrorMsg(msg);
+      setPhase('error');
+    }
+  }
 
   /**
-   * pHash-Fallback für Karten ohne (lesbare) moderne Sammlernummer:
-   * aktuelles Kamerabild im Rahmen hashen und gegen den Bild-Index des Sets
-   * vergleichen. Nie automatisch übernehmen — nur Kandidaten vorschlagen.
+   * pHash-Fallback: aktuelle Karte frei erkennen, entzerren, hashen und
+   * gegen den Bild-Index des Sets vergleichen. Nie automatisch übernehmen.
    */
   async function photoMatch() {
-    if (!activeSet || !guide) return;
+    if (!activeSet) return;
     setCandidates(null);
     setPhotoBusy(true);
     setErrorMsg(null);
@@ -420,10 +602,32 @@ export function Scanner({ activeSet, onHit }: Props) {
         );
       }
       const video = videoRef.current;
+      const cv = cvIfReady();
       if (!video || !video.videoWidth) throw new Error('Video liefert kein Bild (videoWidth=0).');
-      const rect = mapRectToVideo(guide.x, guide.y, guide.w, guide.h);
-      if (!rect) throw new Error('Kein Kamerabild verfügbar.');
-      const hash = hashImageSource(video, rect.sx, rect.sy, rect.sw, rect.sh);
+      if (!cv) throw new Error('OpenCV ist noch nicht geladen.');
+
+      const detW = DETECT_W;
+      const detH = Math.round((video.videoHeight / video.videoWidth) * detW);
+      const det = (detCanvasRef.current ??= document.createElement('canvas'));
+      det.width = detW;
+      det.height = detH;
+      const dctx = det.getContext('2d', { willReadFrequently: true });
+      if (!dctx) throw new Error('Canvas nicht verfügbar.');
+      dctx.drawImage(video, 0, 0, detW, detH);
+      const result = detectCardQuad(cv, dctx.getImageData(0, 0, detW, detH));
+      if (!result.quad) {
+        throw new Error('Keine Karte im Bild erkannt — Karte flach und vollständig ins Bild legen.');
+      }
+
+      const ww = Math.min(WORK_W, video.videoWidth);
+      const wh = Math.round((video.videoHeight / video.videoWidth) * ww);
+      const work = (workCanvasRef.current ??= document.createElement('canvas'));
+      work.width = ww;
+      work.height = wh;
+      work.getContext('2d')?.drawImage(video, 0, 0, ww, wh);
+      const warped = warpCard(cv, work, scaleQuad(result.quad, ww / detW));
+
+      const hash = hashImageSource(warped);
       const matches = matchHash(hash, index, 3);
       setCandidates(
         matches.map((m) => ({
@@ -449,66 +653,20 @@ export function Scanner({ activeSet, onHit }: Props) {
     }
   }
 
-  async function start() {
-    setErrorMsg(null);
-    setPhase('starting');
-    countersRef.current = { analyzed: 0, skipped: 0 };
-    setDiag(EMPTY_DIAG);
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error(
-          'Kamera-API nicht verfügbar. Die Seite muss über HTTPS (oder localhost) laufen – siehe README, Abschnitt „Auf dem Tablet testen“.',
-        );
-      }
-      // OCR parallel zum Kamera-Start initialisieren; Status kommt über onOcrStatus
-      const ocrReady = initOcr();
-      // Asset-Preflight für die Diagnose (nicht blockierend)
-      checkOcrAssets().then(setAssetChecks).catch(() => {});
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      });
-      streamRef.current = stream;
-      const video = videoRef.current;
-      if (!video) throw new Error('Video-Element fehlt.');
-      video.srcObject = stream;
-      await video.play();
-      // Verdachtsfall 2: NIE auf die Canvas zeichnen, bevor das Video bereit ist
-      await waitForVideoReady(video, 8000);
-      await ocrReady;
-      setPhase('scanning');
-    } catch (err) {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-      let msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof DOMException && err.name === 'NotAllowedError') {
-        msg =
-          'Kamera-Zugriff wurde verweigert. In Chrome: Schloss-Symbol in der Adressleiste → Berechtigungen → Kamera erlauben, dann neu versuchen.';
-      } else if (err instanceof DOMException && err.name === 'NotFoundError') {
-        msg = 'Keine Kamera gefunden.';
-      }
-      setErrorMsg(msg);
-      setPhase('error');
-    }
-  }
-
-  function ocrStatusLabel(s: OcrStatus): string {
+  function statusLabel(s: OcrStatus | CvStatus): string {
     switch (s.state) {
       case 'idle':
         return `nicht initialisiert (${s.detail})`;
       case 'loading':
         return `lädt … ${s.detail}`;
       case 'ready':
-        return `bereit (${s.detail})`;
+        return `bereit`;
       case 'error':
         return `FEHLER: ${s.detail}`;
     }
   }
+
+  const rejectEntries = Object.entries(diag.rejects).sort((a, b) => b[1] - a[1]);
 
   return (
     <section className="card-section scanner">
@@ -523,7 +681,9 @@ export function Scanner({ activeSet, onHit }: Props) {
       )}
 
       {phase === 'starting' && (
-        <p className="muted">Starte Kamera … (OCR: {ocrStatusLabel(ocrStatus)})</p>
+        <p className="muted">
+          Starte Kamera … (OCR: {statusLabel(ocrStatus)} · OpenCV: {statusLabel(cvStatus)})
+        </p>
       )}
 
       {errorMsg && <p className="inline-error">{errorMsg}</p>}
@@ -533,47 +693,38 @@ export function Scanner({ activeSet, onHit }: Props) {
         className={`scanner-view ${phase === 'scanning' || phase === 'starting' ? '' : 'hidden'} ${flash === 'ok' ? 'flash-ok' : ''}`}
       >
         <video ref={videoRef} playsInline muted />
-        {guide && phase === 'scanning' && (
-          <>
-            <div
-              className="guide"
-              style={{ left: guide.x, top: guide.y, width: guide.w, height: guide.h }}
-            />
-            <div
-              className="guide-corner"
-              style={{
-                left: guide.x,
-                top: guide.y + guide.h * (1 - CORNER_H),
-                width: guide.w * 0.46,
-                height: guide.h * CORNER_H,
-              }}
-            />
-            <div
-              className="guide-corner"
-              style={{
-                left: guide.x + guide.w * 0.54,
-                top: guide.y + guide.h * (1 - CORNER_H),
-                width: guide.w * 0.46,
-                height: guide.h * CORNER_H,
-              }}
-            />
-          </>
-        )}
+        <canvas ref={overlayRef} className="scanner-overlay" />
         {phase === 'scanning' && (
           <div className="scanner-hint">
-            Karte in den Rahmen legen – die Nummer (z. B. 136/189) wird automatisch gelesen
+            Karte einfach ins Bild halten – der gelbe Rahmen zeigt die erkannte Karte
           </div>
         )}
       </div>
 
       {phase === 'scanning' && (
         <div className="scanner-actions">
+          {torchSupported && (
+            <button onClick={() => void toggleTorch()} className={torchOn ? 'torch-on' : ''}>
+              🔦 {torchOn ? 'Licht aus' : 'Licht an'}
+            </button>
+          )}
+          {devices.length > 1 && (
+            <select
+              value={currentDeviceId ?? ''}
+              onChange={(e) => void switchCamera(e.target.value)}
+              title="Kamera wählen"
+            >
+              {devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          )}
           <button onClick={() => void photoMatch()} disabled={photoBusy}>
             {photoBusy ? (indexProgress ?? 'Vergleiche Bild …') : '🔍 Foto-Abgleich (ohne Nummer)'}
           </button>
-          <button onClick={stop} className="scanner-stop">
-            Kamera stoppen
-          </button>
+          <button onClick={stop}>Kamera stoppen</button>
         </div>
       )}
 
@@ -598,19 +749,34 @@ export function Scanner({ activeSet, onHit }: Props) {
 
           <dl className="diag-grid">
             <dt>OCR-Engine</dt>
-            <dd className={ocrStatus.state === 'error' ? 'diag-bad' : ''}>{ocrStatusLabel(ocrStatus)}</dd>
+            <dd className={ocrStatus.state === 'error' ? 'diag-bad' : ''}>{statusLabel(ocrStatus)}</dd>
+
+            <dt>OpenCV</dt>
+            <dd className={cvStatus.state === 'error' ? 'diag-bad' : ''}>{statusLabel(cvStatus)}</dd>
 
             <dt>Video-Stream</dt>
             <dd>{diag.videoInfo}</dd>
 
-            <dt>Capture-Canvas</dt>
-            <dd>{diag.captureInfo}</dd>
+            <dt>Erkennung</dt>
+            <dd>{diag.detect}</dd>
 
-            <dt>Analysierte Frames</dt>
+            <dt>Schärfe (Laplace-Varianz)</dt>
+            <dd>{diag.sharpness}</dd>
+
+            <dt>Frames analysiert</dt>
             <dd>
-              {diag.framesAnalyzed} (übersprungen: {diag.framesSkipped}
-              {diag.skipReason ? ` — zuletzt: ${diag.skipReason}` : ''})
+              {diag.framesAnalyzed} · OCR-Läufe: {diag.ocrRuns}
             </dd>
+
+            <dt>Verworfen (Gating)</dt>
+            <dd>
+              {rejectEntries.length === 0
+                ? '–'
+                : rejectEntries.map(([reason, n]) => `${reason}: ${n}`).join(' · ')}
+            </dd>
+
+            <dt>Capture</dt>
+            <dd>{diag.captureInfo}</dd>
 
             <dt>Mittlere Helligkeit</dt>
             <dd className={diag.brightness.includes('SCHWARZ') ? 'diag-bad' : ''}>{diag.brightness}</dd>
@@ -641,7 +807,7 @@ export function Scanner({ activeSet, onHit }: Props) {
           <p className="diag-label">Letzter Frame (Capture-Vorschau):</p>
           <canvas ref={diagFrameRef} className="diag-frame" />
 
-          <p className="diag-label">Nummernbereich links / rechts (vergrößert, nach Vorverarbeitung):</p>
+          <p className="diag-label">Nummernbereich links / rechts (entzerrt, nach CLAHE):</p>
           <canvas ref={diagLeftRef} className="diag-crop" />
           <canvas ref={diagRightRef} className="diag-crop" />
 

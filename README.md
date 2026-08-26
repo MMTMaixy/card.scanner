@@ -13,13 +13,24 @@ Architektur und Entscheidungen: siehe [PLAN.md](PLAN.md).
 2. **Set laden**: einmalig pro Set (braucht Internet), danach offline aus
    IndexedDB. Geladen werden Kartennamen (gewählte Sprache **und** Englisch),
    Sammlernummern und die verfügbaren Finishes pro Karte (TCGdex).
-3. **Scannen**: Karte in den Rahmen legen — die Sammlernummer unten
-   (z. B. `136/189`) wird kontinuierlich per OCR gelesen. Der Nenner muss zur
-   Kartenzahl des Sets passen und zwei Lesungen müssen übereinstimmen, erst
-   dann zählt der Treffer (Beep + Vibration). Eine liegende Karte wird nicht
-   doppelt gezählt; dieselbe Karte nach kurzem Wegnehmen erneut scannen
-   erhöht die Menge. Alternativ: Nummer eintippen oder **Foto-Abgleich**
-   (Bildvergleich per dHash) für Karten ohne lesbare Nummer.
+3. **Scannen**: Karte einfach irgendwo flach ins Bild halten — kein fester
+   Rahmen nötig. OpenCV.js (lokal gebündelt) findet die Kartenkontur
+   (Kanten → Vierecke → größtes plausibles Rechteck im Kartenformat),
+   markiert sie **gelb im Livebild** und entzerrt sie perspektivisch;
+   daraus wird der Nummernbereich abgeleitet, mit CLAHE kontrastnormalisiert
+   und per OCR gelesen (z. B. `136/189`). Vor der OCR steht ein
+   **Frame-Gating**: nur scharfe (Laplace-Varianz), ruhige Frames mit
+   erkannter Karte gehen an Tesseract — die Diagnose zeigt, wie viele
+   Frames warum verworfen wurden. Der Nenner muss zur Kartenzahl des Sets
+   passen und zwei Lesungen müssen übereinstimmen, erst dann zählt der
+   Treffer (Beep + Vibration). Eine liegende Karte wird nicht doppelt
+   gezählt; dieselbe Karte nach kurzem Wegnehmen erneut scannen erhöht die
+   Menge. Bei wenig Licht: **Taschenlampen-Knopf** (wenn die Kamera es
+   kann), Kameraauswahl bei mehreren Rückkameras, Stream mit 10 fps für
+   längere Belichtung. Alternativ: Nummer eintippen oder **Foto-Abgleich**
+   (Bildvergleich per dHash auf der entzerrten Karte). Hinweis: Die Karte
+   sollte grob aufrecht liegen (Drehung/Kippung ist egal, nur nicht quer
+   oder kopfüber), damit der Nummernbereich unten gesucht wird.
 4. **Plausibilitätsprüfung**: Steht der Batch z. B. auf „Reverse Holo“ und die
    Karte existiert laut Datenbank nicht als Reverse (Secret Rare etc.), wird
    die Zeile **gelb** markiert — mit Hinweis, welche Finishes es gibt, und

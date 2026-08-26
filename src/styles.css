@@ -385,19 +385,19 @@ select {
   object-fit: cover;
 }
 
-.guide {
+.scanner-overlay {
   position: absolute;
-  border: 2px solid rgba(255, 255, 255, 0.85);
-  border-radius: 10px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
 }
 
-.guide-corner {
-  position: absolute;
-  border: 2px dashed var(--accent);
-  border-radius: 6px;
-  pointer-events: none;
+.torch-on {
+  background: var(--warn-border);
+  border-color: var(--warn-border);
+  color: #14161b;
+  font-weight: 600;
 }
 
 .scanner-hint {

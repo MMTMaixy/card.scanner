@@ -26,7 +26,8 @@ export default defineConfig({
       workbox: {
         // App-Shell inkl. OCR-Assets vorab cachen -> komplett offline nutzbar
         globPatterns: ['**/*.{js,css,html,png,svg,wasm}', 'tesseract/**/*'],
-        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        // OpenCV.js-Chunk ist ~13 MB (WASM eingebettet)
+        maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
       },
     }),
   ],
