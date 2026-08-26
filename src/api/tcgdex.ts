@@ -1,4 +1,7 @@
+import { isAsiaLang } from '../types';
 import type { CardInfo, Language, SetInfo, SetListEntry, Variants } from '../types';
+import { asiaSetNameEn } from '../data/asiaSetNamesEn';
+import speciesEn from '../data/speciesEn.json';
 
 /**
  * TCGdex (api.tcgdex.net) — kostenlos, ohne API-Key, mit deutschen Kartennamen
@@ -33,6 +36,24 @@ interface ApiCardFull {
   image?: string;
   rarity?: string;
   variants?: Variants;
+  category?: string;
+  dexId?: number[];
+  suffix?: string;
+}
+
+/**
+ * Asien-Sets haben in TCGdex keine englischen Kartennamen. Für Pokémon-Karten
+ * synthetisieren wir einen aus Pokédex-Nummer + Suffix ("Pikachu ex") — das
+ * genügt fürs (normalisierte) Namens-Matching der Cardmarket-Extension.
+ * Trainer/Energie behalten den Originalnamen.
+ */
+function synthesizeEnName(card: ApiCardFull | null): string | undefined {
+  if (!card || card.category !== 'Pokemon') return undefined;
+  const dex = card.dexId?.[0];
+  if (!dex) return undefined;
+  const species = (speciesEn as Record<string, string>)[String(dex)];
+  if (!species) return undefined;
+  return card.suffix ? `${species} ${card.suffix}` : species;
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -59,6 +80,8 @@ export async function fetchSetList(lang: Language): Promise<SetListEntry[]> {
     .map((s) => ({
       id: s.id,
       name: s.name,
+      // Bei ja/zh: englischer Name aus der kuratierten Tabelle (TCGdex hat keine)
+      nameEn: isAsiaLang(lang) ? asiaSetNameEn(s.id) : undefined,
       officialCount: s.cardCount?.official ?? 0,
       totalCount: s.cardCount?.total ?? 0,
       logo: s.logo,
@@ -87,9 +110,11 @@ export async function downloadSet(
     throw new Error(`Set ${setId} enthält laut TCGdex keine Karten in dieser Sprache (${lang}).`);
   }
 
-  // Englische Namen für das Cardmarket-Matching (Produktnamen sind englisch)
+  // Englische Namen für das Cardmarket-Matching (Produktnamen sind englisch).
+  // Asien-Sets existieren nicht im en-Endpoint — dort synthetisieren wir
+  // stattdessen unten pro Karte einen Namen aus der Pokédex-Nummer.
   let namesEn = new Map<string, string>();
-  if (lang !== 'en') {
+  if (lang !== 'en' && !isAsiaLang(lang)) {
     onProgress?.({ step: 'names-en', done: 0, total: 1 });
     try {
       const en = await fetchJson<ApiSetDetail>(`${API}/en/sets/${setId}`);
@@ -125,22 +150,29 @@ export async function downloadSet(
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
+  const asia = isAsiaLang(lang);
   const cards: CardInfo[] = briefs.map((brief, i) => {
     const full = results[i];
     const localId = String(brief.localId);
     return {
       localId,
       nameLocal: brief.name,
-      nameEn: lang === 'en' ? brief.name : namesEn.get(localId),
+      nameEn: lang === 'en' ? brief.name : asia ? synthesizeEnName(full) : namesEn.get(localId),
       rarity: full?.rarity,
       variants: full?.variants,
       image: full?.image ?? brief.image,
     };
   });
 
+  // Anzeigename: bei Asien-Sets englisch aus der Tabelle; sonst Code + Original,
+  // damit der Name immer (lateinisch) lesbar bleibt.
+  const displayName = asia
+    ? (asiaSetNameEn(detail.id) ?? `${detail.id} · ${detail.name}`)
+    : detail.name;
+
   return {
     id: detail.id,
-    name: detail.name,
+    name: displayName,
     lang,
     officialCount: detail.cardCount?.official ?? 0,
     totalCount: detail.cardCount?.total ?? cards.length,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildExportFiles, csvEscape, CONDITION_TO_CSV } from './csv';
+import { buildExportFiles, csvEscape, CONDITION_TO_CSV, LANGUAGE_TO_CSV } from './csv';
 import type { ScanRow } from '../types';
 
 function makeRow(overrides: Partial<ScanRow> = {}): ScanRow {
@@ -39,6 +39,15 @@ describe('CONDITION_TO_CSV', () => {
     expect(CONDITION_TO_CSV.LP).toBe('light_played');
     expect(CONDITION_TO_CSV.PL).toBe('played');
     expect(CONDITION_TO_CSV.PO).toBe('poor');
+  });
+});
+
+describe('LANGUAGE_TO_CSV', () => {
+  it('mappt auf die matchStrings der Extension (inkl. Chinesisch)', () => {
+    expect(LANGUAGE_TO_CSV.de).toBe('de');
+    expect(LANGUAGE_TO_CSV.ja).toBe('ja');
+    expect(LANGUAGE_TO_CSV['zh-tw']).toBe('zh-TW');
+    expect(LANGUAGE_TO_CSV['zh-cn']).toBe('zh-CN');
   });
 });
 

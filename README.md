@@ -112,6 +112,35 @@ diesen Hinweis auch beim Export an.
 
 Sprache: `de` / `en` / `ja`. Leerer Preis = Preisfeld bleibt leer.
 
+## Japanische und chinesische Sets
+
+Unterstützte Sprachen: Deutsch, Englisch, Japanisch, **Chinesisch
+(traditionell, zh-tw)** und **Chinesisch (vereinfacht, zh-cn)** — die
+asiatischen TCG-Releases laufen über dieselben TCGdex-Daten.
+
+Damit die Set-Auswahl lesbar bleibt (TCGdex pflegt für Asien-Sets **keine**
+englischen Namen — im Quell-Repo verifiziert):
+
+- Für die Sword/Shield- (S), Scarlet/Violet- (SV) und Mega-Ära (M) zeigt die
+  App **kuratierte englische Namen** („VSTAR Universe“, „Pokémon Card 151“ …)
+  aus `src/data/asiaSetNamesEn.ts`; die zh-tw-Ausgaben nutzen dieselben
+  Set-Codes. Suche funktioniert über englischen Namen, Originalnamen und Code.
+- Sets ohne Tabelleneintrag (ältere Ären, Festlandchina-exklusive Sets)
+  zeigen **Set-Code + Originalname** — der Code ist immer lateinisch lesbar.
+  Neue Sets bitte einfach in der Tabelle ergänzen.
+- **Englische Kartennamen** gibt es bei Asien-Sets ebenfalls nicht in TCGdex.
+  Für Pokémon-Karten synthetisiert die App den Namen aus Pokédex-Nummer +
+  Suffix („Pikachu ex“, Daten: `src/data/speciesEn.json`, generiert per
+  `node scripts/fetch-species-names.mjs`) — das reicht fürs normalisierte
+  Namens-Matching der Extension. **Trainer-/Energiekarten behalten den
+  Originalnamen** und matchen im Cardmarket-Formular ggf. nicht automatisch —
+  diese Zeilen nach dem Import von Hand prüfen/ausfüllen.
+- Cardmarket-Sprachwerte in der CSV: `ja`, `zh-TW` (T-Chinese), `zh-CN`
+  (S-Chinese). Ob Chinesisch für Pokémon-Einzelkarten wählbar ist, bestimmt
+  das Cardmarket-Formular selbst; die Extension matcht gegen dessen Optionen
+  und fällt sonst auf die erste Option zurück — also nach dem Befüllen die
+  Sprachspalte kontrollieren.
+
 ## Debuggen auf dem Tablet (ohne Browser-Konsole)
 
 - **Boot-Fallback**: Beim Laden zeigt die Seite „App startet …“. Verschwindet

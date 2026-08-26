@@ -1,4 +1,11 @@
-export type Language = 'de' | 'en' | 'ja';
+export type Language = 'de' | 'en' | 'ja' | 'zh-tw' | 'zh-cn';
+
+/** Sprachen, deren Sets/Karten in TCGdex keine englischen Namen haben. */
+export const ASIA_LANGS: Language[] = ['ja', 'zh-tw', 'zh-cn'];
+
+export function isAsiaLang(lang: Language): boolean {
+  return ASIA_LANGS.includes(lang);
+}
 
 export type Finish = 'normal' | 'reverse' | 'holo';
 
@@ -43,7 +50,10 @@ export interface SetInfo {
 
 export interface SetListEntry {
   id: string;
+  /** Name in der Set-Sprache */
   name: string;
+  /** Englischer Name (bei Asien-Sets aus der kuratierten Tabelle) */
+  nameEn?: string;
   officialCount: number;
   totalCount: number;
   logo?: string;
@@ -92,4 +102,6 @@ export const LANGUAGES: { value: Language; label: string }[] = [
   { value: 'de', label: 'Deutsch' },
   { value: 'en', label: 'Englisch' },
   { value: 'ja', label: 'Japanisch' },
+  { value: 'zh-tw', label: 'Chinesisch (trad.)' },
+  { value: 'zh-cn', label: 'Chinesisch (vereinf.)' },
 ];

@@ -63,7 +63,12 @@ export function SetManager({ lang, storedSets, activeSetId, onSelect, onStored, 
     if (!setList) return [];
     const q = search.trim().toLowerCase();
     if (!q) return setList;
-    return setList.filter((s) => s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q));
+    return setList.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.id.toLowerCase().includes(q) ||
+        (s.nameEn?.toLowerCase().includes(q) ?? false),
+    );
   }, [setList, search]);
 
   async function handleDownload(entry: SetListEntry) {
@@ -152,9 +157,10 @@ export function SetManager({ lang, storedSets, activeSetId, onSelect, onStored, 
             {filtered.slice(0, 60).map((entry) => (
               <li key={entry.id}>
                 <div className="set-select">
-                  <span className="set-name">{entry.name}</span>
+                  <span className="set-name">{entry.nameEn ?? entry.name}</span>
                   <span className="set-meta">
-                    {entry.id} · {entry.officialCount} Karten
+                    {entry.id}
+                    {entry.nameEn ? ` · ${entry.name}` : ''} · {entry.officialCount} Karten
                     {entry.totalCount > entry.officialCount ? ` (+${entry.totalCount - entry.officialCount} Secret)` : ''}
                   </span>
                 </div>
