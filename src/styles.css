@@ -626,3 +626,73 @@ select {
   background: var(--danger);
   color: #fff;
 }
+
+/* --- Set pro Zeile (erkanntes Set, antippbar zum Korrigieren) --- */
+
+.row-set-button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: rgba(76, 141, 255, 0.1);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-top: 4px;
+  min-height: 0;
+  text-align: left;
+}
+
+/* Woran das Set erkannt wurde, wird farblich unterschieden */
+.row-set-button.source-code {
+  border-left-color: var(--ok);
+  background: rgba(61, 187, 110, 0.1);
+}
+
+.row-set-button.source-manual,
+.row-set-button.source-photo {
+  border-left-color: var(--muted);
+  background: transparent;
+}
+
+.row-set-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.row-set-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.set-code {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  color: var(--muted);
+}
+
+.loading-strip {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.link-button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  padding: 8px 0;
+  text-decoration: underline;
+}

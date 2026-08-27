@@ -9,10 +9,11 @@
  *
  * Ergebnis landet in window.__selftest, damit Playwright es auslesen kann.
  */
-import { detectCardQuad, extractNumberStrip, initCv, warpCard } from './vision/cardDetect';
-import { scaleQuad, WARP_H, WARP_W, type Pt } from './vision/quad';
-import { initOcr, recognizeDigits } from './ocr/ocr';
+import { detectCardQuad, extractCodeBoxes, extractNumberStrip, initCv, warpCard } from './vision/cardDetect';
+import { cardWidthFraction, isCardBigEnoughForOcr, scaleQuad, WARP_H, WARP_W, type Pt } from './vision/quad';
+import { initOcr, recognizeCode, recognizeDigits } from './ocr/ocr';
 import { parseScanText } from './logic/numberParse';
+import { codeTokens } from './logic/setIndex';
 
 const log = document.getElementById('log')!;
 const out = document.getElementById('out')!;
@@ -77,10 +78,16 @@ function makeSyntheticCard(): HTMLCanvasElement {
   ctx.font = '20px sans-serif';
   ctx.fillText('Listiges Versteckspiel', 70, 490);
   ctx.fillText('Hinterhältiger Fall', 70, 560);
-  // Sammlernummer unten links — Größe wie auf einer echten Karte (~1,6 % Höhe)
+  // Set-Code-Kästchen unten links, wie auf modernen Karten
+  ctx.fillStyle = '#111';
+  ctx.fillRect(40, 793, 34, 17);
+  ctx.fillStyle = '#f2f0e6';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.fillText('PBL', 44, 806);
+  // Sammlernummer daneben — Größe wie auf einer echten Karte (~1,6 % Höhe)
   ctx.fillStyle = '#111';
   ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('005/084', 78, 806);
+  ctx.fillText('005/084', 84, 806);
   ctx.font = '11px sans-serif';
   ctx.fillText('©2026 Pokémon/Nintendo', 240, 828);
   return c;
@@ -139,7 +146,16 @@ async function runCase(
   cv: any,
   name: string,
   scene: HTMLCanvasElement,
-  opts: { expectQuad: boolean; truth?: Pt[]; expectNumber?: string },
+  opts: {
+    expectQuad: boolean;
+    truth?: Pt[];
+    expectNumber?: string;
+    expectCode?: string;
+    /** Grenzfall: Lesung darf ausbleiben, aber niemals falsch sein */
+    numberMayBeMissing?: boolean;
+    /** Erwartung an das Größen-Gating vor der OCR */
+    expectBigEnough?: boolean;
+  },
 ): Promise<boolean> {
   say(`--- Fall „${name}“ (${scene.width}×${scene.height}) ---`);
   const detW = 480;
@@ -191,6 +207,22 @@ async function runCase(
     );
   }
 
+  const widthFraction = cardWidthFraction(q, detW);
+  const bigEnough = isCardBigEnoughForOcr(q, detW);
+  say(`  Kartenbreite: ${(widthFraction * 100).toFixed(0)} % des Bildes → OCR ${bigEnough ? 'erlaubt' : 'gesperrt'}`);
+  let gatingOk = true;
+  if (opts.expectBigEnough !== undefined) {
+    gatingOk = bigEnough === opts.expectBigEnough;
+    if (!gatingOk) say(`  FEHLER: Größen-Gating erwartet ${opts.expectBigEnough}`);
+  }
+
+  if (!bigEnough) {
+    // Die App liest hier gar nicht — genau darum geht es. Weitere Prüfungen
+    // wären ein Test von Code, der im Betrieb nie erreicht wird.
+    say('  OCR wird übersprungen (Gating) — wie in der App');
+    return cornersOk && gatingOk;
+  }
+
   const ww = Math.min(2560, scene.width);
   const wh = Math.round((scene.height / scene.width) * ww);
   const work = document.createElement('canvas');
@@ -205,6 +237,7 @@ async function runCase(
   }
 
   let numberOk = !opts.expectNumber;
+  let wrongNumber: string | null = null;
   outer: for (const side of ['left', 'right'] as const) {
     for (const variant of ['binary', 'gray'] as const) {
       const strip = extractNumberStrip(cv, warped, side, variant);
@@ -216,17 +249,47 @@ async function runCase(
         `  OCR ${side}/${variant}: "${text}" (${Math.round(performance.now() - t1)} ms) -> ${parsed ? `${parsed.numerator}/${parsed.denominator}` : 'kein Muster'}`,
       );
       if (opts.expectNumber && parsed) {
-        if (`${Number(parsed.numerator)}/${parsed.denominator}` === opts.expectNumber) {
+        const got = `${Number(parsed.numerator)}/${parsed.denominator}`;
+        if (got === opts.expectNumber) {
           numberOk = true;
           break outer;
         }
+        wrongNumber = got;
       }
     }
   }
   if (opts.expectNumber) {
-    say(`  Nummer ${opts.expectNumber} gelesen: ${numberOk ? 'JA' : 'NEIN'}`);
+    if (opts.numberMayBeMissing) {
+      // An der Auflösungsgrenze zählt nur: keine FALSCHE Nummer erfinden.
+      numberOk = !wrongNumber;
+      say(
+        `  Nummer ${opts.expectNumber}: ${
+          wrongNumber ? `FALSCHE Lesung "${wrongNumber}" — das darf nie passieren` : 'keine Fehllesung'
+        }`,
+      );
+    } else {
+      say(`  Nummer ${opts.expectNumber} gelesen: ${numberOk ? 'JA' : 'NEIN'}`);
+    }
   }
-  return cornersOk && numberOk;
+
+  // Eigene Passe für den Set-Code (stärker vergrößert)
+  let codeOk = !opts.expectCode;
+  if (opts.expectCode) {
+    for (const side of ['left', 'right'] as const) {
+      const boxes = extractCodeBoxes(cv, warped, side);
+      say(`  Code-Kästchen ${side}: ${boxes.length} gefunden`);
+      for (const [i, box] of boxes.entries()) {
+        show(`${name}: Code ${side}#${i}`, box);
+        const text = (await recognizeCode(box)).replace(/\s+/g, ' ').trim();
+        const tokens = codeTokens(text);
+        say(`  Set-Code ${side}#${i}: "${text}" -> Tokens ${JSON.stringify(tokens)}`);
+        if (tokens.includes(opts.expectCode)) codeOk = true;
+      }
+    }
+    say(`  Set-Code ${opts.expectCode} gelesen: ${codeOk ? 'JA' : 'NEIN'}`);
+  }
+
+  return cornersOk && numberOk && codeOk && gatingOk;
 }
 
 async function run() {
@@ -253,6 +316,7 @@ async function run() {
         expectQuad: true,
         truth: truthA,
         expectNumber: '5/84',
+        expectCode: 'PBL',
       }),
     );
 
@@ -264,10 +328,29 @@ async function run() {
       { x: 408, y: 905 },
     ];
     results.push(
-      await runCase(cv, 'A2 klein+frontal', buildScene(cv, card, truthB, 1080, 1400), {
+      // Grenzfall: Karte füllt nur ~31 % des Bildes, die Nummer ist dann
+      // nur wenige Pixel hoch. Hier zählt, dass nichts Falsches entsteht.
+      await runCase(cv, 'A2 klein (Auflösungsgrenze)', buildScene(cv, card, truthB, 1080, 1400), {
         expectQuad: true,
         truth: truthB,
+        expectBigEnough: false,
+      }),
+    );
+
+    // A4: realistischer Tablet-Scan — 1080p-Kamera, Karte füllt den Sucher
+    const truthD: Pt[] = [
+      { x: 250, y: 300 },
+      { x: 1000, y: 330 },
+      { x: 980, y: 1400 },
+      { x: 230, y: 1370 },
+    ];
+    results.push(
+      await runCase(cv, 'A4 formatfuellend', buildScene(cv, card, truthD, 1200, 1800), {
+        expectQuad: true,
+        truth: truthD,
         expectNumber: '5/84',
+        expectCode: 'PBL',
+        expectBigEnough: true,
       }),
     );
 

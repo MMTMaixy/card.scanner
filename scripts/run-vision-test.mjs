@@ -85,6 +85,10 @@ try {
   shutdown(1);
 }
 
+if (process.env.SHOT) {
+  await page.screenshot({ path: process.env.SHOT, fullPage: true });
+  console.log('Screenshot:', process.env.SHOT);
+}
 await browser.close();
 if (!result.ok) {
   console.error(`\nFEHLGESCHLAGEN: ${result.error}`);

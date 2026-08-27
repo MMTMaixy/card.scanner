@@ -6,10 +6,20 @@ interface Props {
   rows: ScanRow[];
   onChange: (row: ScanRow, patch: Partial<ScanRow>) => void;
   onRemove: (row: ScanRow) => void;
+  /** Set dieser Zeile korrigieren */
+  onChangeSet: (row: ScanRow) => void;
 }
 
+/** Woran das Set erkannt wurde — für die Anzeige an der Zeile. */
+const SOURCE_LABELS: Record<ScanRow['setSource'], string> = {
+  code: 'Set-Code gelesen',
+  denominator: 'über Kartenzahl bestimmt',
+  manual: 'manuell gewählt',
+  photo: 'Foto-Abgleich',
+};
+
 /** Ergebnisliste: neueste zuerst, jede Zeile editierbar, Wisch nach links löscht. */
-export function RowList({ rows, onChange, onRemove }: Props) {
+export function RowList({ rows, onChange, onRemove, onChangeSet }: Props) {
   const sorted = [...rows].sort((a, b) => b.updatedAt - a.updatedAt);
   const totalArticles = rows.reduce((sum, r) => sum + r.quantity, 0);
   const warnCount = rows.filter((r) => r.status === 'warn').length;
@@ -26,14 +36,24 @@ export function RowList({ rows, onChange, onRemove }: Props) {
       {sorted.length === 0 && <p className="muted">Noch keine Karten gescannt.</p>}
       <ul className="row-list">
         {sorted.map((row) => (
-          <RowItem key={row.id} row={row} onChange={onChange} onRemove={onRemove} />
+          <RowItem key={row.id} row={row} onChange={onChange} onRemove={onRemove} onChangeSet={onChangeSet} />
         ))}
       </ul>
     </section>
   );
 }
 
-function RowItem({ row, onChange, onRemove }: { row: ScanRow; onChange: Props['onChange']; onRemove: Props['onRemove'] }) {
+function RowItem({
+  row,
+  onChange,
+  onRemove,
+  onChangeSet,
+}: {
+  row: ScanRow;
+  onChange: Props['onChange'];
+  onRemove: Props['onRemove'];
+  onChangeSet: Props['onChangeSet'];
+}) {
   const [dragX, setDragX] = useState(0);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
 
@@ -69,10 +89,20 @@ function RowItem({ row, onChange, onRemove }: { row: ScanRow; onChange: Props['o
           <span className="row-number">#{row.localId}</span>
           <span className="row-name">{row.nameLocal}</span>
           {row.nameEn && row.nameEn !== row.nameLocal && <span className="row-name-en">({row.nameEn})</span>}
-          <span className="row-set muted">
-            {row.setName} · {row.lang.toUpperCase()}
-            {row.price.trim() ? ` · ${row.price.trim()} €` : ''}
-          </span>
+          <button
+            className={`row-set-button source-${row.setSource}`}
+            onClick={() => onChangeSet(row)}
+            title="Set dieser Karte ändern"
+          >
+            <span className="row-set-name">
+              {row.setName}
+              {row.setCode ? ` (${row.setCode})` : ''}
+            </span>
+            <span className="row-set-meta">
+              {SOURCE_LABELS[row.setSource]} · {row.lang.toUpperCase()}
+              {row.price.trim() ? ` · ${row.price.trim()} €` : ''} · ändern
+            </span>
+          </button>
         </div>
 
         <div className="row-controls">

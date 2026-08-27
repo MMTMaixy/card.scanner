@@ -99,6 +99,45 @@ export function scaleQuad(q: [Pt, Pt, Pt, Pt], factor: number): [Pt, Pt, Pt, Pt]
 export const WARP_W = 900;
 export const WARP_H = 1257;
 
-/** Nummernbereich in der entzerrten Karte (relative Koordinaten). */
+/**
+ * Untere Infozeile der entzerrten Karte (relative Koordinaten).
+ * Dort stehen Sammlernummer, Set-Code-Kästchen, Seltenheitssymbol und
+ * Copyright — die Region deckt bewusst die ganze Zeile ab, nicht nur die
+ * Nummer.
+ */
 export const STRIP_TOP = 0.845;
+/** Breite einer Hälfte der Infozeile (Nummer steht links oder rechts). */
 export const STRIP_WIDTH = 0.47;
+
+/**
+ * Das Set-Code-Kästchen sitzt am linken (moderne Karten) bzw. rechten Rand
+ * derselben Zeile und ist sehr klein — es bekommt eine eigene, enger
+ * geschnittene und stärker vergrößerte OCR-Passe.
+ */
+export const CODE_TOP = 0.845;
+export const CODE_BOTTOM = 0.95;
+/** Gleiche Hälfte wie die Nummernregion — der Code steht in derselben Zeile. */
+export const CODE_WIDTH = 0.47;
+
+/**
+ * Mindestbreite der Karte im Bild, damit die OCR überhaupt startet.
+ *
+ * Hergeleitet im Selftest: Füllt die Karte weniger als etwa ein Drittel der
+ * Bildbreite, ist die Sammlernummer nur wenige Pixel hoch — dann liefert die
+ * OCR nicht nur „nichts“, sondern gelegentlich eine FALSCHE Nummer
+ * (gemessen: „5/55“ statt „5/84“). Ohne vorgewähltes Set würde die Karte
+ * dadurch still im falschen Set landen. Lieber gar nicht lesen und den
+ * Nutzer bitten, näher heranzugehen.
+ */
+export const MIN_CARD_WIDTH_FRACTION = 0.35;
+
+/** Breite des Vierecks (Mittel aus Ober- und Unterkante) relativ zum Bild. */
+export function cardWidthFraction(quad: [Pt, Pt, Pt, Pt], frameW: number): number {
+  const top = Math.hypot(quad[1].x - quad[0].x, quad[1].y - quad[0].y);
+  const bottom = Math.hypot(quad[2].x - quad[3].x, quad[2].y - quad[3].y);
+  return (top + bottom) / 2 / frameW;
+}
+
+export function isCardBigEnoughForOcr(quad: [Pt, Pt, Pt, Pt], frameW: number): boolean {
+  return cardWidthFraction(quad, frameW) >= MIN_CARD_WIDTH_FRACTION;
+}

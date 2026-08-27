@@ -1,4 +1,7 @@
 import {
+  CODE_BOTTOM,
+  CODE_TOP,
+  CODE_WIDTH,
   isPlausibleCard,
   MIN_AREA_FRACTION,
   orderCorners,
@@ -306,8 +309,87 @@ export function warpCard(cv: Cv, srcCanvas: HTMLCanvasElement, quad: [Pt, Pt, Pt
  * die Binarisierung zu viel Substanz wegschneidet). Der Scanner probiert
  * 'binary' zuerst und fällt auf 'gray' zurück.
  */
-export type StripVariant = 'binary' | 'gray';
+export type StripVariant = 'binary' | 'gray' | 'binary_inv';
 
+/**
+ * Schneidet einen Bereich der entzerrten Karte aus, hebt den Kontrast
+ * adaptiv an (CLAHE) und vergrößert ihn für die OCR.
+ */
+function extractRegion(
+  cv: Cv,
+  warpedCanvas: HTMLCanvasElement,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+  variant: StripVariant,
+  /**
+   * Fenstergröße der adaptiven Schwelle. Muss KLEINER sein als das zu
+   * erkennende Element: Beim Set-Code-Kästchen (dunkler Kasten in heller
+   * Umgebung) zog ein zu großes Fenster den lokalen Mittelwert aus der
+   * Umgebung — der Kasten samt Text fiel komplett weg.
+   */
+  blockSize = 41,
+): HTMLCanvasElement {
+  const full = cv.imread(warpedCanvas);
+  const roi = full.roi(new cv.Rect(x, y, w, h));
+  const gray = new cv.Mat();
+  const enhanced = new cv.Mat();
+  const resized = new cv.Mat();
+  const binary = new cv.Mat();
+  const padded = new cv.Mat();
+  // Milder als das Maximum: Auf der fast flachen Kartenfläche verstärkt ein
+  // hoher clipLimit nur Rauschen zu großflächigen Helligkeitsverläufen.
+  const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+  try {
+    cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY);
+    clahe.apply(gray, enhanced);
+    cv.resize(enhanced, resized, new cv.Size(Math.round(w * scale), Math.round(h * scale)), 0, 0, cv.INTER_CUBIC);
+    const out = document.createElement('canvas');
+    // Rand in Weiß: Bei eng geschnittenen Ausschnitten findet Tesseracts
+    // Layout-Analyse ohne Rand um den Text oft gar keine Zeile.
+    const PAD = 24;
+    if (variant === 'gray') {
+      cv.copyMakeBorder(resized, padded, PAD, PAD, PAD, PAD, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+      cv.imshow(out, padded);
+      return out;
+    }
+    // Adaptive Schwelle: macht die Ziffern schwarz auf weiß und entfernt
+    // Helligkeitsverläufe. Ohne diesen Schritt lieferte Tesseract im Selftest
+    // auf einer gestochen scharfen Nummer leeren Text, weil seine interne
+    // Schwellwertbildung am Verlauf scheiterte.
+    // Das Set-Code-Kästchen ist auf vielen Karten heller Text auf dunklem
+    // Grund. Tesseract erwartet dunkel auf hell — deshalb gibt es die
+    // invertierte Variante.
+    cv.adaptiveThreshold(
+      resized,
+      binary,
+      255,
+      cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+      variant === 'binary_inv' ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY,
+      blockSize,
+      12,
+    );
+    cv.copyMakeBorder(binary, padded, PAD, PAD, PAD, PAD, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+    cv.imshow(out, padded);
+    return out;
+  } finally {
+    full.delete();
+    roi.delete();
+    gray.delete();
+    enhanced.delete();
+    resized.delete();
+    binary.delete();
+    padded.delete();
+    clahe.delete();
+  }
+}
+
+/**
+ * Passe 1 — Sammlernummer: die komplette untere Infozeile, linke oder rechte
+ * Hälfte (die Nummer steht je nach Kartenära links oder rechts).
+ */
 export function extractNumberStrip(
   cv: Cv,
   warpedCanvas: HTMLCanvasElement,
@@ -318,40 +400,117 @@ export function extractNumberStrip(
   const y = Math.round(WARP_H * STRIP_TOP);
   const w = Math.round(WARP_W * STRIP_WIDTH);
   const h = WARP_H - y;
+  return extractRegion(cv, warpedCanvas, x, y, w, h, 2.2, variant);
+}
+
+/**
+ * Passe 2 — Set-Code: dieselbe Zeile, aber eigens optimiert.
+ *
+ * Drei Unterschiede zur Nummern-Passe, alle im Selftest hergeleitet:
+ *  - nur das Band der Code-Zeile (ohne Copyright-Zeile darunter),
+ *  - 3,5fache statt 2,2facher Vergrößerung, weil der Code winziger ist,
+ *  - umgekehrte Polarität möglich: Das Kästchen ist auf den meisten Karten
+ *    heller Text auf dunklem Grund, und so gedruckten Text liest Tesseract
+ *    ohne Invertierung nicht.
+ */
+export function extractCodeStrip(
+  cv: Cv,
+  warpedCanvas: HTMLCanvasElement,
+  side: 'left' | 'right',
+  variant: StripVariant = 'binary',
+): HTMLCanvasElement {
+  const w = Math.round(WARP_W * CODE_WIDTH);
+  const x = side === 'left' ? 0 : WARP_W - w;
+  const y = Math.round(WARP_H * CODE_TOP);
+  const h = Math.round(WARP_H * (CODE_BOTTOM - CODE_TOP));
+  return extractRegion(cv, warpedCanvas, x, y, w, h, 3.5, variant, 15);
+}
+
+/**
+ * Passe 2b — findet das Set-Code-Kästchen als dunklen Block und schneidet
+ * NUR dieses aus, invertiert.
+ *
+ * Warum dieser Umweg: Der Code steht auf den meisten Karten hell auf dunklem
+ * Kästchen. Invertiert man den ganzen Streifen, stimmt die Polarität zwar im
+ * Kästchen, ist aber im restlichen (hellen) Bild falsch — Tesseract liefert
+ * dann Buchstabensalat. Deshalb erst den Kasten lokalisieren, dann gezielt
+ * invertieren und stark vergrößern.
+ */
+export function extractCodeBoxes(
+  cv: Cv,
+  warpedCanvas: HTMLCanvasElement,
+  side: 'left' | 'right',
+): HTMLCanvasElement[] {
+  const w = Math.round(WARP_W * CODE_WIDTH);
+  const x = side === 'left' ? 0 : WARP_W - w;
+  const y = Math.round(WARP_H * CODE_TOP);
+  const h = Math.round(WARP_H * (CODE_BOTTOM - CODE_TOP));
 
   const full = cv.imread(warpedCanvas);
   const roi = full.roi(new cv.Rect(x, y, w, h));
   const gray = new cv.Mat();
-  const enhanced = new cv.Mat();
-  const resized = new cv.Mat();
-  const binary = new cv.Mat();
-  // Milder als das Maximum: Auf der fast flachen Kartenfläche verstärkt ein
-  // hoher clipLimit nur Rauschen zu großflächigen Helligkeitsverläufen.
-  const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+  const dark = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  const out: HTMLCanvasElement[] = [];
   try {
     cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY);
-    clahe.apply(gray, enhanced);
-    const scale = 2.2;
-    cv.resize(enhanced, resized, new cv.Size(Math.round(w * scale), Math.round(h * scale)), 0, 0, cv.INTER_CUBIC);
-    const out = document.createElement('canvas');
-    if (variant === 'gray') {
-      cv.imshow(out, resized);
-      return out;
+    // Dunkle Flächen isolieren (Otsu, invertiert -> Kasten wird weiß)
+    cv.threshold(gray, dark, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    cv.findContours(dark, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const boxes: { x: number; y: number; width: number; height: number }[] = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const c = contours.get(i);
+      const r = cv.boundingRect(c);
+      c.delete();
+      const aspect = r.width / Math.max(1, r.height);
+      // Ein Code-Kästchen ist breiter als hoch, füllt aber nur einen
+      // kleinen Teil der Zeile — das grenzt es gegen Text und Ränder ab.
+      if (r.height < h * 0.1 || r.height > h * 0.95) continue;
+      if (aspect < 1.1 || aspect > 5) continue;
+      if (r.width < w * 0.04 || r.width > w * 0.45) continue;
+      boxes.push(r);
     }
-    // Adaptive Schwelle: macht die Ziffern schwarz auf weiß und entfernt
-    // Helligkeitsverläufe. Ohne diesen Schritt lieferte Tesseract im Selftest
-    // auf einer gestochen scharfen Nummer leeren Text, weil seine interne
-    // Schwellwertbildung am Verlauf scheiterte.
-    cv.adaptiveThreshold(resized, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 41, 12);
-    cv.imshow(out, binary);
+    // Größte zuerst — das Kästchen ist der dominante dunkle Block der Zeile
+    boxes.sort((a, b) => b.width * b.height - a.width * a.height);
+
+    for (const r of boxes.slice(0, 2)) {
+      // Strikt INNERHALB des Kästchens schneiden. Ein mitgeschnittener
+      // dunkler Rand ringsum lässt Tesseracts Layout-Analyse scheitern —
+      // die Schrift selbst ist dann zwar gestochen scharf, kommt aber als
+      // Zeichensalat zurück.
+      const inset = Math.max(1, Math.round(r.height * 0.12));
+      const bx = r.x + inset;
+      const by = r.y + inset;
+      const bw = Math.max(4, r.width - 2 * inset);
+      const bh = Math.max(4, r.height - 2 * inset);
+      const box = gray.roi(new cv.Rect(bx, by, bw, bh));
+      const inverted = new cv.Mat();
+      const scaled = new cv.Mat();
+      const padded = new cv.Mat();
+      try {
+        cv.bitwise_not(box, inverted);
+        const scale = Math.max(6, 160 / Math.max(1, bh));
+        cv.resize(inverted, scaled, new cv.Size(Math.round(bw * scale), Math.round(bh * scale)), 0, 0, cv.INTER_CUBIC);
+        cv.copyMakeBorder(scaled, padded, 30, 30, 30, 30, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+        const canvas = document.createElement('canvas');
+        cv.imshow(canvas, padded);
+        out.push(canvas);
+      } finally {
+        box.delete();
+        inverted.delete();
+        scaled.delete();
+        padded.delete();
+      }
+    }
     return out;
   } finally {
     full.delete();
     roi.delete();
     gray.delete();
-    enhanced.delete();
-    resized.delete();
-    binary.delete();
-    clahe.delete();
+    dark.delete();
+    contours.delete();
+    hierarchy.delete();
   }
 }

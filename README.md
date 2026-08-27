@@ -8,37 +8,63 @@ Architektur und Entscheidungen: siehe [PLAN.md](PLAN.md).
 
 ## So funktioniert der Ablauf
 
-1. **Batch einstellen** (feste Leiste oben): Set, Sprache, Finish, Zustand,
-   optional Fixpreis. Gilt für alle folgenden Scans.
-2. **Set laden**: einmalig pro Set (braucht Internet), danach offline aus
-   IndexedDB. Geladen werden Kartennamen (gewählte Sprache **und** Englisch),
-   Sammlernummern und die verfügbaren Finishes pro Karte (TCGdex).
-3. **Scannen**: Karte einfach irgendwo flach ins Bild halten — kein fester
-   Rahmen nötig. OpenCV.js (lokal gebündelt) findet die Kartenkontur
-   (Kanten → Vierecke → größtes plausibles Rechteck im Kartenformat),
-   markiert sie **gelb im Livebild** und entzerrt sie perspektivisch;
-   daraus wird der Nummernbereich abgeleitet, mit CLAHE kontrastnormalisiert
-   und per OCR gelesen (z. B. `136/189`). Vor der OCR steht ein
-   **Frame-Gating**: nur scharfe (Laplace-Varianz), ruhige Frames mit
-   erkannter Karte gehen an Tesseract — die Diagnose zeigt, wie viele
-   Frames warum verworfen wurden. Der Nenner muss zur Kartenzahl des Sets
-   passen und zwei Lesungen müssen übereinstimmen, erst dann zählt der
-   Treffer (Beep + Vibration). Eine liegende Karte wird nicht doppelt
-   gezählt; dieselbe Karte nach kurzem Wegnehmen erneut scannen erhöht die
-   Menge. Bei wenig Licht: **Taschenlampen-Knopf** (wenn die Kamera es
-   kann), Kameraauswahl bei mehreren Rückkameras, Stream mit 10 fps für
-   längere Belichtung. Alternativ: Nummer eintippen oder **Foto-Abgleich**
-   (Bildvergleich per dHash auf der entzerrten Karte). Hinweis: Die Karte
-   sollte grob aufrecht liegen (Drehung/Kippung ist egal, nur nicht quer
-   oder kopfüber), damit der Nummernbereich unten gesucht wird.
-4. **Plausibilitätsprüfung**: Steht der Batch z. B. auf „Reverse Holo“ und die
-   Karte existiert laut Datenbank nicht als Reverse (Secret Rare etc.), wird
-   die Zeile **gelb** markiert — mit Hinweis, welche Finishes es gibt, und
+1. **Batch einstellen** (feste Leiste oben): Sprache, Finish, Zustand,
+   optional Fixpreis. **Kein Set mehr vorwählen** — das Set wird pro Karte
+   erkannt.
+2. **Scannen**: Karte flach ins Bild halten, kein fester Rahmen nötig.
+   OpenCV.js findet die Kartenkontur, markiert sie gelb und entzerrt sie
+   perspektivisch. Aus der unteren Infozeile werden zwei Dinge gelesen:
+   die **Sammlernummer** (`005/084`) und der **Set-Code** im kleinen
+   Kästchen (`PBL`, `SVI`, `SV2a`).
+3. **Set bestimmen** — in dieser Reihenfolge:
+   - **(a) Set-Code gelesen** → Set steht sofort fest.
+   - **(b) kein Code, aber Nenner** → die Sets mit dieser Kartenzahl werden
+     vorgeschlagen; bei nur einem Treffer wird er direkt übernommen, sonst
+     genügt ein Tippen. (Auf Deutsch führen 60 % der Kartenzahlen auf genau
+     ein Set, im Schnitt sind es 1,7 Kandidaten.)
+   - **(c) nichts erkannt** → manuelle Auswahl mit Suche über Name,
+     Kennung und Code.
+   Zuletzt genutzte Sets stehen in allen Listen oben — beim Sortieren
+   kommen meist viele Karten desselben Sets hintereinander.
+4. **Erkanntes Set prüfen**: Jede Zeile zeigt das Set und woran es erkannt
+   wurde (grün = Set-Code gelesen). Ein Tippen darauf korrigiert es.
+5. **Plausibilitätsprüfung**: Steht der Batch z. B. auf „Reverse Holo“ und
+   die Karte existiert laut Datenbank nicht als Reverse, wird die Zeile
+   **gelb** markiert — mit Hinweis, welche Finishes es gibt, und
    Ein-Tap-Korrektur. Gelbe Zeilen **blockieren den Export**, bis sie
-   aufgelöst sind (korrigieren oder bewusst behalten — die Datenbank kann
-   auch mal irren).
-5. **Export**: CSV-Dateien getrennt nach **Set + Finish**, automatisch
-   gesplittet bei **100 Artikeln** (Cardmarket-Limit, Summe der Mengen).
+   aufgelöst sind.
+6. **Export**: CSV-Dateien getrennt nach **Set + Finish**, automatisch
+   gesplittet bei **100 Artikeln** (Cardmarket-Limit).
+
+### Karte groß genug ins Bild halten
+
+Füllt die Karte weniger als **35 % der Bildbreite**, liest die App die
+Nummer bewusst **nicht** — die Diagnose zeigt dann „Karte zu klein“. Grund:
+An dieser Grenze liefert die OCR nicht bloß nichts, sondern gelegentlich
+eine *falsche* Nummer (im Test gemessen: `5/55` statt `5/84`). Ohne
+vorgewähltes Set würde die Karte dadurch still im falschen Set landen —
+lieber einmal näher herangehen.
+
+### Der globale Set-Index
+
+`src/data/setIndex.json` (77 KB, reine Textdaten) enthält für **515 Sets**
+den aufgedruckten Set-Code, die offizielle Kartenzahl, die Gesamtzahl und
+die Namen je Sprache. Er wird mitgeliefert und beim Start in IndexedDB
+gespiegelt — die Set-Erkennung funktioniert damit **vollständig offline**.
+Nur die Kartendaten des erkannten Sets werden bei Bedarf nachgeladen
+(einmalig pro Set, danach offline).
+
+Erzeugt wird er aus dem TCGdex-Datenbestand:
+
+```bash
+git clone --depth 1 https://github.com/tcgdex/cards-database /pfad/dazu
+node scripts/build-set-index.mjs /pfad/dazu
+```
+
+Code-Abdeckung: 94 % aller Sets. Deutsch 152 von 170 Sets, Englisch 187 von
+216. Für japanische und chinesische Sets pflegt TCGdex keine Abkürzungen —
+dort ist die Set-Kennung selbst der aufgedruckte Code (`SV2a`), was die App
+nutzt.
 
 ## Auf dem Tablet testen
 
@@ -121,7 +147,7 @@ diesen Hinweis auch beim Export an.
 | PL | `played` |
 | PO | `poor` |
 
-Sprache: `de` / `en` / `ja`. Leerer Preis = Preisfeld bleibt leer.
+Sprache: `de` / `en` / `ja` / `zh-TW` / `zh-CN`. Leerer Preis = Preisfeld bleibt leer.
 
 ## Japanische und chinesische Sets
 
@@ -239,7 +265,8 @@ PWA-Icons: `node scripts/gen-icons.mjs`.
   keine deutschen Namen.)
 - **OCR braucht die Nummer im Format `x/y`.** Promos ohne diese Nummer:
   Nummer eintippen oder Foto-Abgleich nutzen.
-- **Der Foto-Abgleich schlägt nur vor**, er übernimmt nie automatisch —
+- **Der Foto-Abgleich sucht nur in den zuletzt genutzten Sets** (höchstens
+  drei) und schlägt nur vor, statt automatisch zu übernehmen —
   bei ähnlichen Artworks (gleiche Karte in mehreren Versionen) bewusst
   den richtigen Kandidaten antippen.
 - **Japanische Sets:** TCGdex führt sie, aber die Abdeckung ist dünner als

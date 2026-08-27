@@ -7,6 +7,7 @@ function makeRow(overrides: Partial<ScanRow> = {}): ScanRow {
     id: Math.floor(Math.random() * 1e9),
     setId: 'sv01',
     setName: 'Karmesin & Purpur',
+    setSource: 'code',
     lang: 'de',
     localId: '1',
     nameLocal: 'Felori',

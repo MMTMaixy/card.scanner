@@ -4,6 +4,7 @@ import {
   getOcrStatus,
   initOcr,
   onOcrStatus,
+  recognizeCode,
   recognizeDigits,
   type AssetCheck,
   type OcrStatus,
@@ -11,6 +12,7 @@ import {
 import {
   cvIfReady,
   detectCardQuad,
+  extractCodeBoxes,
   extractNumberStrip,
   getCvStatus,
   initCv,
@@ -18,16 +20,36 @@ import {
   warpCard,
   type CvStatus,
 } from '../vision/cardDetect';
-import { maxCornerDelta, scaleQuad, WARP_H, WARP_W, type Pt } from '../vision/quad';
-import { normalizeLocalId, parseScanText, scanMatchesSet } from '../logic/numberParse';
-import { hashImageSource } from '../phash/dhash';
-import { buildHashIndex, loadHashIndex, matchHash } from '../phash/matcher';
-import type { SetInfo } from '../types';
+import {
+  cardWidthFraction,
+  isCardBigEnoughForOcr,
+  maxCornerDelta,
+  MIN_CARD_WIDTH_FRACTION,
+  scaleQuad,
+  WARP_H,
+  WARP_W,
+  type Pt,
+} from '../vision/quad';
+import { normalizeLocalId, parseScanText } from '../logic/numberParse';
+
+/** Was eine gescannte Karte hergibt, bevor das Set bestimmt ist. */
+export interface Reading {
+  numerator: string;
+  denominator: number;
+  /** Roher OCR-Text der Set-Code-Passe (kann leer sein) */
+  codeText: string;
+}
 
 interface Props {
-  activeSet: SetInfo | undefined;
-  /** Übernimmt die erkannte Nummer in die Liste; true = erfolgreich. */
-  onHit: (numerator: string) => Promise<boolean>;
+  /**
+   * Prüft, ob ein gelesener Nenner in der gewählten Sprache überhaupt zu
+   * einem Set gehört. Ersetzt die frühere Prüfung gegen das vorgewählte Set.
+   */
+  isPlausibleReading: (denominator: number, numerator: string) => boolean;
+  /** Übernimmt die Lesung; true = Karte wurde eingetragen. */
+  onScan: (reading: Reading) => Promise<boolean>;
+  /** Foto-Abgleich mit der entzerrten Karte (Fallback ohne lesbare Nummer). */
+  onPhotoMatch: (warped: HTMLCanvasElement) => Promise<void>;
 }
 
 type Phase = 'idle' | 'starting' | 'scanning' | 'error';
@@ -71,6 +93,7 @@ interface DiagInfo {
   brightness: string;
   left: SideDiag | null;
   right: SideDiag | null;
+  code: string;
 }
 
 const EMPTY_DIAG: DiagInfo = {
@@ -84,6 +107,7 @@ const EMPTY_DIAG: DiagInfo = {
   brightness: '–',
   left: null,
   right: null,
+  code: '–',
 };
 
 interface CameraDevice {
@@ -123,13 +147,11 @@ function waitForVideoReady(video: HTMLVideoElement, timeoutMs: number): Promise<
   });
 }
 
-export function Scanner({ activeSet, onHit }: Props) {
+export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [flash, setFlash] = useState<'ok' | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
-  const [indexProgress, setIndexProgress] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<{ localId: string; distance: number; name: string }[] | null>(null);
   const [ocrStatus, setOcrStatus] = useState<OcrStatus>(getOcrStatus());
   const [cvStatus, setCvStatus] = useState<CvStatus>(getCvStatus());
   const [assetChecks, setAssetChecks] = useState<AssetCheck[] | null>(null);
@@ -161,6 +183,8 @@ export function Scanner({ activeSet, onHit }: Props) {
   const diagLeftRef = useRef<HTMLCanvasElement>(null);
   const diagRightRef = useRef<HTMLCanvasElement>(null);
   const sideDiagRef = useRef<{ left: SideDiag | null; right: SideDiag | null }>({ left: null, right: null });
+  const codeDiagRef = useRef('–');
+  const diagCodeRef = useRef<HTMLCanvasElement>(null);
   const captureInfoRef = useRef('–');
 
   useEffect(() => onOcrStatus(setOcrStatus), []);
@@ -282,10 +306,9 @@ export function Scanner({ activeSet, onHit }: Props) {
   function describeParse(raw: string): string {
     const parsed = parseScanText(raw);
     if (!parsed) return 'kein Zähler/Nenner-Muster';
-    if (!activeSet) return `gelesen ${parsed.numerator}/${parsed.denominator}, kein Set aktiv`;
-    const fits = scanMatchesSet(parsed, activeSet);
+    const fits = isPlausibleReading(parsed.denominator, parsed.numerator);
     return `gelesen ${parsed.numerator}/${parsed.denominator} — Nenner ${
-      fits ? 'passt' : `passt NICHT (erwartet ${activeSet.officialCount})`
+      fits ? 'kommt in dieser Sprache vor' : 'gehoert zu keinem Set dieser Sprache'
     }`;
   }
 
@@ -304,14 +327,14 @@ export function Scanner({ activeSet, onHit }: Props) {
       brightness: brightnessRef.current,
       left: sideDiagRef.current.left,
       right: sideDiagRef.current.right,
+      code: codeDiagRef.current,
     });
   }
 
   const handleReading = useCallback(
-    async (text: string): Promise<boolean> => {
-      if (!activeSet) return false;
+    async (text: string, codeText: string): Promise<boolean> => {
       const parsed = parseScanText(text);
-      if (!parsed || !scanMatchesSet(parsed, activeSet)) return false;
+      if (!parsed || !isPlausibleReading(parsed.denominator, parsed.numerator)) return false;
 
       const key = `${normalizeLocalId(parsed.numerator)}/${parsed.denominator}`;
       const now = Date.now();
@@ -331,7 +354,11 @@ export function Scanner({ activeSet, onHit }: Props) {
       }
       pendingRef.current = null;
 
-      const ok = await onHit(parsed.numerator);
+      const ok = await onScan({
+        numerator: parsed.numerator,
+        denominator: parsed.denominator,
+        codeText,
+      });
       if (ok) {
         locksRef.current.set(key, Date.now() + LOCK_MS);
         beep();
@@ -340,7 +367,7 @@ export function Scanner({ activeSet, onHit }: Props) {
       }
       return ok;
     },
-    [activeSet, onHit],
+    [isPlausibleReading, onScan],
   );
 
   /** OCR auf der entzerrten Karte (läuft asynchron neben der Erkennungsschleife). */
@@ -364,14 +391,17 @@ export function Scanner({ activeSet, onHit }: Props) {
         const warped = warpCard(cv, work, quadWork);
 
         countersRef.current.ocrRuns++;
-        // Beide unteren Ecken, je zwei Vorverarbeitungen. 'binary' trifft
-        // besser, wenn die Karte den Sucher füllt; 'gray' rettet die Fälle,
-        // in denen die Nummer sehr klein ist. Die zweite Variante läuft nur,
-        // wenn die erste nichts Gültiges ergab.
+
+        // --- Passe 1: Sammlernummer aus der unteren Infozeile ---
+        // Beide Hälften, je zwei Vorverarbeitungen. 'binary' trifft besser,
+        // wenn die Karte den Sucher füllt; 'gray' rettet die Fälle, in denen
+        // die Nummer sehr klein ist. Die zweite Variante läuft nur, wenn die
+        // erste nichts Gültiges ergab.
+        let numberText: string | null = null;
         outer: for (const side of ['left', 'right'] as const) {
           for (const variant of ['binary', 'gray'] as const) {
             const strip = extractNumberStrip(cv, warped, side, variant);
-            captureInfoRef.current = `Karte ${WARP_W}×${WARP_H}, Streifen ${strip.width}×${strip.height} (${variant})`;
+            captureInfoRef.current = `Karte ${WARP_W}×${WARP_H}, Zeile ${strip.width}×${strip.height} (${variant})`;
             copyToDiagCanvas(strip, side === 'left' ? diagLeftRef.current : diagRightRef.current);
             const t0 = performance.now();
             const text = await recognizeDigits(strip);
@@ -380,11 +410,28 @@ export function Scanner({ activeSet, onHit }: Props) {
             sideDiagRef.current[side] = { raw: `${variant}: ${raw}`, parsed: describeParse(raw), ms };
 
             const parsed = parseScanText(raw);
-            if (!parsed || !activeSet || !scanMatchesSet(parsed, activeSet)) continue;
-            await handleReading(raw);
+            if (!parsed || !isPlausibleReading(parsed.denominator, parsed.numerator)) continue;
+            numberText = raw;
             break outer;
           }
         }
+        if (!numberText) return;
+
+        // --- Passe 2: Set-Code aus dem kleinen Kästchen derselben Zeile ---
+        // Das Kästchen wird erst als dunkler Block lokalisiert, dann strikt
+        // innerhalb geschnitten, invertiert und stark vergrößert. Ohne diese
+        // Isolierung liefert Tesseract nur Zeichensalat (im Selftest belegt).
+        let codeText = '';
+        for (const side of ['left', 'right'] as const) {
+          for (const [i, box] of extractCodeBoxes(cv, warped, side).entries()) {
+            if (side === 'left' && i === 0) copyToDiagCanvas(box, diagCodeRef.current);
+            const text = (await recognizeCode(box)).replace(/\s+/g, ' ').trim();
+            if (text) codeText += (codeText ? ' ' : '') + text;
+          }
+        }
+        codeDiagRef.current = codeText || '∅ leer';
+
+        await handleReading(numberText, codeText);
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
       } finally {
@@ -392,7 +439,7 @@ export function Scanner({ activeSet, onHit }: Props) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [handleReading],
+    [handleReading, isPlausibleReading],
   );
 
   /** Erkennungsschleife: Kontur suchen, Overlay zeichnen, Gating, ggf. OCR anstoßen. */
@@ -454,7 +501,10 @@ export function Scanner({ activeSet, onHit }: Props) {
         stableCountRef.current = 0;
       }
 
-      if (result.sharpness < SHARPNESS_MIN) {
+      if (!isCardBigEnoughForOcr(result.quad, detW)) {
+        reject('Karte zu klein');
+        detectMsg = `Karte erkannt, aber zu klein (${(cardWidthFraction(result.quad, detW) * 100).toFixed(0)} % der Bildbreite, nötig ${MIN_CARD_WIDTH_FRACTION * 100} %) — näher heranhalten`;
+      } else if (result.sharpness < SHARPNESS_MIN) {
         reject('unscharf');
         detectMsg = 'Karte erkannt, aber unscharf';
       } else if (stableCountRef.current < STABLE_N) {
@@ -600,21 +650,14 @@ export function Scanner({ activeSet, onHit }: Props) {
   }
 
   /**
-   * pHash-Fallback: aktuelle Karte frei erkennen, entzerren, hashen und
-   * gegen den Bild-Index des Sets vergleichen. Nie automatisch übernehmen.
+   * Foto-Abgleich: Karte erkennen, entzerren und die entzerrte Karte an die
+   * App geben. Welche Sets verglichen werden, entscheidet die App — der
+   * Abgleich läuft bewusst nur über die Kandidatensets.
    */
   async function photoMatch() {
-    if (!activeSet) return;
-    setCandidates(null);
     setPhotoBusy(true);
     setErrorMsg(null);
     try {
-      let index = await loadHashIndex(activeSet.id);
-      if (!index) {
-        index = await buildHashIndex(activeSet, (done, total) =>
-          setIndexProgress(`Bild-Index wird einmalig geladen: ${done}/${total} …`),
-        );
-      }
       const video = videoRef.current;
       const cv = cvIfReady();
       if (!video || !video.videoWidth) throw new Error('Video liefert kein Bild (videoWidth=0).');
@@ -641,29 +684,11 @@ export function Scanner({ activeSet, onHit }: Props) {
       work.getContext('2d')?.drawImage(video, 0, 0, ww, wh);
       const warped = warpCard(cv, work, scaleQuad(result.quad, ww / detW));
 
-      const hash = hashImageSource(warped);
-      const matches = matchHash(hash, index, 3);
-      setCandidates(
-        matches.map((m) => ({
-          ...m,
-          name: activeSet.cards.find((c) => c.localId === m.localId)?.nameLocal ?? '?',
-        })),
-      );
+      await onPhotoMatch(warped);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
       setPhotoBusy(false);
-      setIndexProgress(null);
-    }
-  }
-
-  async function pickCandidate(localId: string) {
-    const ok = await onHit(localId);
-    if (ok) {
-      beep();
-      setFlash('ok');
-      setTimeout(() => setFlash(null), 450);
-      setCandidates(null);
     }
   }
 
@@ -686,9 +711,7 @@ export function Scanner({ activeSet, onHit }: Props) {
     <section className="card-section scanner">
       <h2>Scannen</h2>
 
-      {!activeSet && <p className="muted">Erst oben ein Set wählen – dann kann die Kamera starten.</p>}
-
-      {(phase === 'idle' || phase === 'error') && activeSet && (
+      {(phase === 'idle' || phase === 'error') && (
         <button className="primary" onClick={() => void start()}>
           📷 Kamera starten
         </button>
@@ -736,24 +759,9 @@ export function Scanner({ activeSet, onHit }: Props) {
             </select>
           )}
           <button onClick={() => void photoMatch()} disabled={photoBusy}>
-            {photoBusy ? (indexProgress ?? 'Vergleiche Bild …') : '🔍 Foto-Abgleich (ohne Nummer)'}
+            {photoBusy ? 'Vergleiche Bild …' : '🔍 Foto-Abgleich (ohne Nummer)'}
           </button>
           <button onClick={stop}>Kamera stoppen</button>
-        </div>
-      )}
-
-      {candidates && (
-        <div className="candidates">
-          <p>Ähnlichste Karten im Set — passende antippen:</p>
-          {candidates.map((c) => (
-            <button key={c.localId} className="chip" onClick={() => void pickCandidate(c.localId)}>
-              #{c.localId} {c.name}
-              <span className="muted"> (Abstand {c.distance})</span>
-            </button>
-          ))}
-          <button className="chip chip-outline" onClick={() => setCandidates(null)}>
-            Keine davon
-          </button>
         </div>
       )}
 
@@ -806,6 +814,9 @@ export function Scanner({ activeSet, onHit }: Props) {
               )}
             </dd>
 
+            <dt>Set-Code (roh)</dt>
+            <dd>{diag.code}</dd>
+
             <dt>OCR rechts (roh)</dt>
             <dd>
               {diag.right ? (
@@ -821,9 +832,12 @@ export function Scanner({ activeSet, onHit }: Props) {
           <p className="diag-label">Letzter Frame (Capture-Vorschau):</p>
           <canvas ref={diagFrameRef} className="diag-frame" />
 
-          <p className="diag-label">Nummernbereich links / rechts (entzerrt, nach CLAHE):</p>
+          <p className="diag-label">Untere Infozeile links / rechts (entzerrt, aufbereitet):</p>
           <canvas ref={diagLeftRef} className="diag-crop" />
           <canvas ref={diagRightRef} className="diag-crop" />
+
+          <p className="diag-label">Set-Code-Ausschnitt (4fach vergrößert):</p>
+          <canvas ref={diagCodeRef} className="diag-crop" />
 
           <p className="diag-label">Tesseract-Dateien (Pfad-Check):</p>
           {assetChecks ? (

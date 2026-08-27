@@ -97,10 +97,37 @@ export function initOcr(): Promise<Worker> {
   return workerPromise;
 }
 
-export async function recognizeDigits(canvas: HTMLCanvasElement): Promise<string> {
+let currentPsm: PSM = PSM.SINGLE_BLOCK;
+
+/**
+ * Erkennt Text in einem Ausschnitt.
+ *
+ * Der Segmentierungsmodus ist wählbar, weil die beiden Passen
+ * Unterschiedliches brauchen: die Infozeile ist ein mehrzeiliger Block,
+ * der Set-Code dagegen ein einzelnes kurzes Wort — mit SINGLE_WORD liest
+ * Tesseract ihn deutlich zuverlässiger.
+ */
+export async function recognizeText(
+  canvas: HTMLCanvasElement,
+  psm: PSM = PSM.SINGLE_BLOCK,
+): Promise<string> {
   const worker = await initOcr();
+  if (psm !== currentPsm) {
+    await worker.setParameters({ tessedit_pageseg_mode: psm });
+    currentPsm = psm;
+  }
   const { data } = await worker.recognize(canvas);
   return data.text ?? '';
+}
+
+/** Rückwärtskompatibler Name für die Nummern-Passe. */
+export async function recognizeDigits(canvas: HTMLCanvasElement): Promise<string> {
+  return recognizeText(canvas, PSM.SINGLE_BLOCK);
+}
+
+/** Passe für das Set-Code-Kästchen: ein kurzes Wort. */
+export async function recognizeCode(canvas: HTMLCanvasElement): Promise<string> {
+  return recognizeText(canvas, PSM.SINGLE_WORD);
 }
 
 // --- Asset-Preflight für die Diagnose ---

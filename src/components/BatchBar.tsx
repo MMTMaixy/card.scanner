@@ -1,38 +1,19 @@
-import type { BatchSettings, Condition, Finish, Language, SetInfo } from '../types';
+import type { BatchSettings, Condition, Finish, Language } from '../types';
 import { CONDITIONS, FINISH_LABELS, LANGUAGES } from '../types';
 
 interface Props {
   batch: BatchSettings;
-  activeSet: SetInfo | undefined;
   onChange: (patch: Partial<BatchSettings>) => void;
-  onOpenSetManager: () => void;
 }
 
 /**
- * Feste Leiste oben: die Batch-Einstellungen gelten für alle folgenden Scans
- * und müssen jederzeit sichtbar sein, damit nicht 80 Karten mit falscher
- * Einstellung gescannt werden.
+ * Feste Leiste oben: Sprache, Finish, Zustand und Preis gelten für alle
+ * folgenden Scans. Das Set wird NICHT mehr vorgewählt — es wird pro Karte
+ * aus dem aufgedruckten Set-Code bzw. dem Nenner bestimmt.
  */
-export function BatchBar({ batch, activeSet, onChange, onOpenSetManager }: Props) {
+export function BatchBar({ batch, onChange }: Props) {
   return (
     <header className="batch-bar">
-      <button
-        className={`set-button ${activeSet ? '' : 'set-button-missing'}`}
-        onClick={onOpenSetManager}
-        title="Set wählen oder laden"
-      >
-        {activeSet ? (
-          <>
-            <span className="set-name">{activeSet.name}</span>
-            <span className="set-meta">
-              {activeSet.officialCount} Karten{activeSet.totalCount > activeSet.officialCount ? ` (+${activeSet.totalCount - activeSet.officialCount} Secret)` : ''}
-            </span>
-          </>
-        ) : (
-          <span className="set-name">Set wählen …</span>
-        )}
-      </button>
-
       <label className="batch-field">
         <span>Sprache</span>
         <select value={batch.lang} onChange={(e) => onChange({ lang: e.target.value as Language })}>

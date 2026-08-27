@@ -20,6 +20,8 @@ export interface Variants {
 }
 
 export interface CardInfo {
+  /** Kartenkennung der API, z. B. "swsh3-136" (fürs Nachladen der Details) */
+  apiId?: string;
   /** Sammlernummer wie von TCGdex geliefert, z. B. "136" oder "TG12" */
   localId: string;
   /** Name in der gewählten Set-Sprache */
@@ -60,7 +62,6 @@ export interface SetListEntry {
 }
 
 export interface BatchSettings {
-  setId: string | null;
   lang: Language;
   finish: Finish;
   condition: Condition;
@@ -70,10 +71,16 @@ export interface BatchSettings {
 
 export type RowStatus = 'ok' | 'warn';
 
+/** Wie das Set dieser Zeile bestimmt wurde (für die Anzeige). */
+export type SetSource = 'code' | 'denominator' | 'manual' | 'photo';
+
 export interface ScanRow {
   id?: number;
   setId: string;
   setName: string;
+  /** Aufgedruckter Set-Code, falls bekannt */
+  setCode?: string;
+  setSource: SetSource;
   lang: Language;
   localId: string;
   nameLocal: string;

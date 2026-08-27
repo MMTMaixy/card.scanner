@@ -1,4 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import type { SetIndexFile } from './logic/setIndex';
 import type { BatchSettings, Language, ScanRow, SetInfo } from './types';
 
 interface ScannerDB extends DBSchema {
@@ -40,6 +41,37 @@ function db(): Promise<IDBPDatabase<ScannerDB>> {
 
 export function setKey(lang: Language, setId: string): string {
   return `${lang}:${setId}`;
+}
+
+// --- Globaler Set-Index (Textdaten, offline) ---
+
+/**
+ * Der Index liegt als generierte JSON mit im Bundle, wird aber zusätzlich in
+ * IndexedDB gehalten: So sind Nachschlagevorgänge unabhängig vom Bundle und
+ * der Index kann später aktualisiert werden, ohne die App neu auszuliefern.
+ */
+export async function loadSetIndex(): Promise<SetIndexFile | undefined> {
+  return (await (await db()).get('settings', 'setIndex')) as SetIndexFile | undefined;
+}
+
+export async function saveSetIndex(index: SetIndexFile): Promise<void> {
+  await (await db()).put('settings', index, 'setIndex');
+}
+
+// --- Zuletzt genutzte Sets ---
+
+const RECENT_MAX = 12;
+
+export async function getRecentSets(): Promise<string[]> {
+  return ((await (await db()).get('settings', 'recentSets')) as string[] | undefined) ?? [];
+}
+
+/** Schiebt eine Set-Kennung an die Spitze der Liste zuletzt genutzter Sets. */
+export async function pushRecentSet(setId: string): Promise<string[]> {
+  const current = await getRecentSets();
+  const next = [setId, ...current.filter((id) => id !== setId)].slice(0, RECENT_MAX);
+  await (await db()).put('settings', next, 'recentSets');
+  return next;
 }
 
 // --- Settings ---

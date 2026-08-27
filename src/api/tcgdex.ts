@@ -96,8 +96,105 @@ export interface SetDownloadProgress {
 }
 
 /**
- * Lädt ein Set komplett: Metadaten, Kartennamen in Set-Sprache und Englisch,
- * und die variants pro Karte (Einzelabrufe mit Parallelität 8).
+ * Lädt nur die Kurzdaten eines Sets: eine Anfrage, liefert Kartennamen und
+ * Nummern. Reicht, um eine gescannte Karte sofort in die Liste zu übernehmen.
+ * Die Finish-Daten (variants) kommen anschließend über enrichSetVariants
+ * nach — die brauchen einen Abruf pro Karte und dürfen das Scannen nicht
+ * blockieren.
+ */
+export async function fetchSetBrief(lang: Language, setId: string): Promise<SetInfo> {
+  const detail = await fetchJson<ApiSetDetail>(`${API}/${lang}/sets/${setId}`);
+  if (!Array.isArray(detail.cards) || detail.cards.length === 0) {
+    throw new Error(`Set ${setId} enthält laut TCGdex keine Karten in dieser Sprache (${lang}).`);
+  }
+
+  let namesEn = new Map<string, string>();
+  if (lang !== 'en' && !isAsiaLang(lang)) {
+    try {
+      const en = await fetchJson<ApiSetDetail>(`${API}/en/sets/${setId}`);
+      namesEn = new Map(en.cards.map((c) => [String(c.localId), c.name]));
+    } catch {
+      namesEn = new Map();
+    }
+  }
+
+  const asia = isAsiaLang(lang);
+  const cards: CardInfo[] = detail.cards.map((brief) => {
+    const localId = String(brief.localId);
+    return {
+      apiId: brief.id,
+      localId,
+      nameLocal: brief.name,
+      nameEn: lang === 'en' ? brief.name : asia ? undefined : namesEn.get(localId),
+      image: brief.image,
+    };
+  });
+
+  return {
+    id: detail.id,
+    name: asia ? (asiaSetNameEn(detail.id) ?? `${detail.id} · ${detail.name}`) : detail.name,
+    lang,
+    officialCount: detail.cardCount?.official ?? 0,
+    totalCount: detail.cardCount?.total ?? cards.length,
+    logo: detail.logo,
+    cards,
+    fetchedAt: Date.now(),
+    variantsComplete: false,
+  };
+}
+
+/**
+ * Ergänzt ein Set um die Finish-Daten pro Karte (und bei asiatischen Sets um
+ * synthetische englische Namen). Läuft im Hintergrund, 8 Abrufe parallel.
+ */
+export async function enrichSetVariants(
+  lang: Language,
+  set: SetInfo,
+  onProgress?: (done: number, total: number) => void,
+): Promise<SetInfo> {
+  const cards = set.cards;
+  const results = new Array<ApiCardFull | null>(cards.length).fill(null);
+  let done = 0;
+  let failures = 0;
+  const total = cards.length;
+  onProgress?.(0, total);
+
+  const CONCURRENCY = 8;
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < cards.length) {
+      const index = next++;
+      try {
+        const apiId = cards[index].apiId ?? `${set.id}-${cards[index].localId}`;
+        results[index] = await fetchJson<ApiCardFull>(`${API}/${lang}/cards/${apiId}`);
+      } catch {
+        failures++;
+      }
+      done++;
+      onProgress?.(done, total);
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+  const asia = isAsiaLang(lang);
+  const merged: CardInfo[] = cards.map((card, i) => {
+    const full = results[i];
+    return {
+      ...card,
+      rarity: full?.rarity ?? card.rarity,
+      variants: full?.variants ?? card.variants,
+      image: full?.image ?? card.image,
+      nameEn: card.nameEn ?? (asia ? synthesizeEnName(full) : undefined),
+    };
+  });
+
+  return { ...set, cards: merged, variantsComplete: failures === 0, fetchedAt: Date.now() };
+}
+
+/**
+ * Lädt ein Set komplett (Kurzdaten + Finish-Daten). Für die manuelle
+ * Set-Verwaltung; beim Scannen wird stattdessen zuerst nur fetchSetBrief
+ * benutzt, damit die Karte sofort in die Liste kann.
  */
 export async function downloadSet(
   lang: Language,
@@ -105,82 +202,10 @@ export async function downloadSet(
   onProgress?: (p: SetDownloadProgress) => void,
 ): Promise<SetInfo> {
   onProgress?.({ step: 'meta', done: 0, total: 1 });
-  const detail = await fetchJson<ApiSetDetail>(`${API}/${lang}/sets/${setId}`);
-  if (!Array.isArray(detail.cards) || detail.cards.length === 0) {
-    throw new Error(`Set ${setId} enthält laut TCGdex keine Karten in dieser Sprache (${lang}).`);
-  }
-
-  // Englische Namen für das Cardmarket-Matching (Produktnamen sind englisch).
-  // Asien-Sets existieren nicht im en-Endpoint — dort synthetisieren wir
-  // stattdessen unten pro Karte einen Namen aus der Pokédex-Nummer.
-  let namesEn = new Map<string, string>();
-  if (lang !== 'en' && !isAsiaLang(lang)) {
-    onProgress?.({ step: 'names-en', done: 0, total: 1 });
-    try {
-      const en = await fetchJson<ApiSetDetail>(`${API}/en/sets/${setId}`);
-      namesEn = new Map(en.cards.map((c) => [String(c.localId), c.name]));
-    } catch {
-      // Kein Blocker: dann exportieren wir den lokalen Namen
-      namesEn = new Map();
-    }
-  }
-
-  // Volle Karten (variants, rarity) einzeln laden, 8 parallel
-  const briefs = detail.cards;
-  const results = new Array<ApiCardFull | null>(briefs.length).fill(null);
-  let done = 0;
-  let failures = 0;
-  const total = briefs.length;
-  onProgress?.({ step: 'cards', done: 0, total });
-
-  const CONCURRENCY = 8;
-  let next = 0;
-  async function worker(): Promise<void> {
-    while (next < briefs.length) {
-      const index = next++;
-      const brief = briefs[index];
-      try {
-        results[index] = await fetchJson<ApiCardFull>(`${API}/${lang}/cards/${brief.id}`);
-      } catch {
-        failures++;
-      }
-      done++;
-      onProgress?.({ step: 'cards', done, total });
-    }
-  }
-  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
-
-  const asia = isAsiaLang(lang);
-  const cards: CardInfo[] = briefs.map((brief, i) => {
-    const full = results[i];
-    const localId = String(brief.localId);
-    return {
-      localId,
-      nameLocal: brief.name,
-      nameEn: lang === 'en' ? brief.name : asia ? synthesizeEnName(full) : namesEn.get(localId),
-      rarity: full?.rarity,
-      variants: full?.variants,
-      image: full?.image ?? brief.image,
-    };
-  });
-
-  // Anzeigename: bei Asien-Sets englisch aus der Tabelle; sonst Code + Original,
-  // damit der Name immer (lateinisch) lesbar bleibt.
-  const displayName = asia
-    ? (asiaSetNameEn(detail.id) ?? `${detail.id} · ${detail.name}`)
-    : detail.name;
-
-  return {
-    id: detail.id,
-    name: displayName,
-    lang,
-    officialCount: detail.cardCount?.official ?? 0,
-    totalCount: detail.cardCount?.total ?? cards.length,
-    logo: detail.logo,
-    cards,
-    fetchedAt: Date.now(),
-    variantsComplete: failures === 0,
-  };
+  const brief = await fetchSetBrief(lang, setId);
+  return enrichSetVariants(lang, brief, (done, total) =>
+    onProgress?.({ step: 'cards', done, total }),
+  );
 }
 
 /** Bild-URL für den pHash-Fallback (kleine Version). */
