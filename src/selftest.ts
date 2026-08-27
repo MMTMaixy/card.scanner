@@ -13,7 +13,9 @@ import { detectCardQuad, extractCodeBoxes, extractNumberStrip, initCv, warpCard 
 import { cardWidthFraction, isCardBigEnoughForOcr, scaleQuad, WARP_H, WARP_W, type Pt } from './vision/quad';
 import { initOcr, recognizeCode, recognizeDigits } from './ocr/ocr';
 import { parseScanText } from './logic/numberParse';
-import { codeTokens } from './logic/setIndex';
+import { codeTokens, identifySet, type SetIndexEntry } from './logic/setIndex';
+import setIndexFile from './data/setIndex.json';
+import realCardJa from './fixtures/card-ja.jpg';
 
 const log = document.getElementById('log')!;
 const out = document.getElementById('out')!;
@@ -292,6 +294,109 @@ async function runCase(
   return cornersOk && numberOk && codeOk && gatingOk;
 }
 
+/** Prüft die komplette Kette an einem echten Kamerafoto. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function runRealPhoto(
+  cv: any,
+  url: string,
+  expectNumber: string,
+  expectCode: string,
+  lang: 'de' | 'ja',
+): Promise<boolean> {
+  say(`--- Echtes Foto (${lang}) ---`);
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const scene = document.createElement('canvas');
+  scene.width = img.naturalWidth;
+  scene.height = img.naturalHeight;
+  scene.getContext('2d')!.drawImage(img, 0, 0);
+
+  const detW = 480;
+  const detH = Math.round((scene.height / scene.width) * detW);
+  const det = document.createElement('canvas');
+  det.width = detW;
+  det.height = detH;
+  const dctx = det.getContext('2d', { willReadFrequently: true })!;
+  dctx.drawImage(scene, 0, 0, detW, detH);
+
+  const dbg: string[] = [];
+  const detection = detectCardQuad(cv, dctx.getImageData(0, 0, detW, detH), dbg);
+  dbg.slice(0, 8).forEach((d) => say(`    ${d}`));
+  if (!detection.quad) {
+    say(`  FEHLER: keine Karte gefunden (${detection.rejectReason ?? '-'})`);
+    return false;
+  }
+  const q = detection.quad;
+  const w = (Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y) + Math.hypot(q[2].x - q[3].x, q[2].y - q[3].y)) / 2;
+  const h = (Math.hypot(q[3].x - q[0].x, q[3].y - q[0].y) + Math.hypot(q[2].x - q[1].x, q[2].y - q[1].y)) / 2;
+  const aspect = h / w;
+  say(`  Verhältnis des Treffers: ${aspect.toFixed(2)} (Karte ist 1,40)`);
+  const aspectOk = aspect > 1.28 && aspect < 1.55;
+  if (!aspectOk) say('  FEHLER: Treffer hat kein Kartenformat — vermutlich ein Rechteck der Unterlage');
+
+  dctx.strokeStyle = '#ffe14d';
+  dctx.lineWidth = 3;
+  dctx.beginPath();
+  dctx.moveTo(q[0].x, q[0].y);
+  for (let i = 1; i < 4; i++) dctx.lineTo(q[i].x, q[i].y);
+  dctx.closePath();
+  dctx.stroke();
+  show(`Echtes Foto (${lang}): Umriss`, det);
+
+  const ww = Math.min(2560, scene.width);
+  const wh = Math.round((scene.height / scene.width) * ww);
+  const work = document.createElement('canvas');
+  work.width = ww;
+  work.height = wh;
+  work.getContext('2d')!.drawImage(scene, 0, 0, ww, wh);
+  const warped = warpCard(cv, work, scaleQuad(q, ww / detW));
+  show(`Echtes Foto (${lang}): entzerrt`, warped);
+
+  let numberOk = false;
+  let readNumber = '';
+  outer: for (const side of ['left', 'right'] as const) {
+    for (const variant of ['binary', 'gray'] as const) {
+      const strip = extractNumberStrip(cv, warped, side, variant);
+      show(`Echtes Foto: Zeile ${side}/${variant}`, strip);
+      const text = (await recognizeDigits(strip)).replace(/\s+/g, ' ').trim();
+      const parsed = parseScanText(text);
+      say(`  OCR ${side}/${variant}: "${text}" -> ${parsed ? `${parsed.numerator}/${parsed.denominator}` : 'kein Muster'}`);
+      if (parsed) {
+        readNumber = `${Number(parsed.numerator)}/${parsed.denominator}`;
+        if (readNumber === `${Number(expectNumber.split('/')[0])}/${Number(expectNumber.split('/')[1])}`) {
+          numberOk = true;
+          break outer;
+        }
+      }
+    }
+  }
+  say(`  Nummer ${expectNumber}: ${numberOk ? 'gelesen' : `NICHT gelesen (bekam „${readNumber || '-'}“)`}`);
+
+  let codeText = '';
+  for (const side of ['left', 'right'] as const) {
+    for (const box of extractCodeBoxes(cv, warped, side)) {
+      show(`Echtes Foto: Code ${side}`, box);
+      const text = (await recognizeCode(box)).replace(/\s+/g, ' ').trim();
+      if (text) codeText += (codeText ? ' ' : '') + text;
+    }
+  }
+  say(`  Set-Code roh: "${codeText}" -> Tokens ${JSON.stringify(codeTokens(codeText))}`);
+
+  // Was würde die App daraus machen?
+  const ident = identifySet({
+    sets: (setIndexFile as unknown as { sets: SetIndexEntry[] }).sets,
+    lang,
+    denominator: Number(expectNumber.split('/')[1]),
+    codeText,
+  });
+  say(`  Set-Bestimmung: ${ident.mode}${ident.set ? ` -> ${ident.set.id}` : ` (${ident.candidates.length} Kandidaten)`}`);
+  const codeOk = codeTokens(codeText).includes(expectCode);
+  say(`  Set-Code ${expectCode}: ${codeOk ? 'gelesen' : 'nicht gelesen'}`);
+
+  return aspectOk && numberOk;
+}
+
 async function run() {
   try {
     say('lade OpenCV …');
@@ -367,6 +472,11 @@ async function run() {
         expectQuad: false,
       }),
     );
+
+    // R1: ECHTES Foto vom Gerät (japanische Karte auf Stoff, mit dem
+    // Overlay-Rechteck der App im Bild). Genau hier hat die Erkennung
+    // zuvor ein 31 % zu breites Rechteck als Karte genommen.
+    results.push(await runRealPhoto(cv, realCardJa, '019/063', 'M1S', 'ja'));
 
     const ok = results.every(Boolean);
     finish(ok, ok ? undefined : 'Ground-Truth-Fälle fehlgeschlagen — siehe Protokoll');

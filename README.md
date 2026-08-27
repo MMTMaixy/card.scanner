@@ -36,6 +36,22 @@ Architektur und Entscheidungen: siehe [PLAN.md](PLAN.md).
 6. **Export**: CSV-Dateien getrennt nach **Set + Finish**, automatisch
    gesplittet bei **100 Artikeln** (Cardmarket-Limit).
 
+### Wie die Karte gefunden wird
+
+Zwei unabhängige Quellen liefern Kandidaten, gewählt wird der mit dem
+**kartenähnlichsten Seitenverhältnis** (88:63 ≈ 1,40) — nicht der größte:
+
+1. **Kanten** (Canny) — funktioniert bei klarem Kontrast zur Unterlage.
+2. **Farbsättigung** — Karten sind bunt bedruckt, Tisch und Stoff nicht.
+
+Beide Punkte stammen aus Fehlern an echten Fotos: Zuerst gewann ein 31 %
+zu breites Rechteck der Unterlage (Verhältnis 1,13), weil unter mehreren
+Treffern der größte genommen wurde. Danach fand Canny an einer hellblauen
+Kartenunterkante nur die kräftige Linie darüber — die entzerrte Karte
+verlor genau die Zeile mit der Sammlernummer. Über die Sättigung wird
+dieselbe Karte mit Verhältnis 1,40 gefunden und die Nummer korrekt gelesen.
+Das Foto liegt als Regressionstest in `src/fixtures/`.
+
 ### Karte groß genug ins Bild halten
 
 Füllt die Karte weniger als **35 % der Bildbreite**, liest die App die
@@ -60,6 +76,12 @@ Erzeugt wird er aus dem TCGdex-Datenbestand:
 git clone --depth 1 https://github.com/tcgdex/cards-database /pfad/dazu
 node scripts/build-set-index.mjs /pfad/dazu
 ```
+
+**Wie gut wird der Code wirklich gelesen?** Auf sauberen, formatfüllenden
+Aufnahmen zuverlässig; auf einem freihändigen Foto mit kleinem, dunklem
+Kästchen (getestet an einer japanischen Karte) nicht. Dann greift Weg (b):
+Die Kartenzahl liefert die Kandidaten, ein Tipp genügt. Erwarte also nicht,
+dass jede Karte ohne Rückfrage durchläuft.
 
 Code-Abdeckung: 94 % aller Sets. Deutsch 152 von 170 Sets, Englisch 187 von
 216. Für japanische und chinesische Sets pflegt TCGdex keine Abkürzungen —

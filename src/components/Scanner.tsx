@@ -69,8 +69,12 @@ const WORK_W = 2560;
 const SHARPNESS_MIN = 45;
 /** So viele stabile Frames in Folge, bevor die OCR startet. */
 const STABLE_N = 2;
-/** Max. Eckverschiebung (Anteil der Framebreite), die noch als stabil gilt. */
-const STABLE_DELTA = 0.025;
+/**
+ * Max. Eckverschiebung (Anteil der Framebreite), die noch als stabil gilt.
+ * Auf dem Gerät wurden mit 0,025 rund 90 % der Frames als „instabil“
+ * verworfen — beim Halten in der Hand zittert der Umriss immer etwas.
+ */
+const STABLE_DELTA = 0.045;
 /** Sperre gegen Doppelzählung; wird verlängert, solange die Karte im Bild liegt. */
 const LOCK_MS = 2000;
 /** Zwei übereinstimmende Lesungen innerhalb dieses Fensters = Treffer. */

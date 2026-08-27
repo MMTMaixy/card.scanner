@@ -38,6 +38,8 @@ export function polygonArea(pts: Pt[]): number {
 export interface QuadCheck {
   ok: boolean;
   reason?: string;
+  /** Gemessenes Seitenverhältnis (Höhe/Breite), wenn plausibel */
+  aspect?: number;
 }
 
 /**
@@ -46,6 +48,27 @@ export interface QuadCheck {
  * dass eine erkannte Karte lautlos zwischen den Prüfungen verschwand.
  */
 export const MIN_AREA_FRACTION = 0.04;
+
+/** Seitenverhältnis einer Pokémon-Karte: 88 mm hoch zu 63 mm breit. */
+export const CARD_ASPECT = 88 / 63;
+/**
+ * Erlaubter Bereich fürs Seitenverhältnis.
+ *
+ * Bewusst eng: Mit der früheren Spanne 1,05–1,8 wurde auf einem echten Foto
+ * ein 31 % zu breites Rechteck (Verhältnis 1,13) als Karte akzeptiert. Da
+ * unter mehreren Treffern der größte gewann, verdrängte es die richtige
+ * Karte — und der entzerrte Ausschnitt zeigte dann die falsche Zeile.
+ */
+export const ASPECT_MIN = 1.2;
+export const ASPECT_MAX = 1.65;
+
+/**
+ * Wie gut passt ein Seitenverhältnis zur Karte? 0 = perfekt.
+ * Logarithmisch, damit Abweichungen nach oben und unten gleich zählen.
+ */
+export function aspectError(aspect: number): number {
+  return Math.abs(Math.log(aspect / CARD_ASPECT));
+}
 
 /**
  * Ist das Viereck plausibel eine (aufrecht liegende, beliebig gedrehte/
@@ -72,9 +95,11 @@ export function isPlausibleCard(ordered: [Pt, Pt, Pt, Pt], frameW: number, frame
 
   // Hochformat: Vertikale ~1,4x der Horizontalen (63x88 mm), mit Toleranz
   const aspect = ((left + right) / 2) / ((top + bottom) / 2);
-  if (aspect < 1.05 || aspect > 1.8) return { ok: false, reason: `Seitenverhältnis ${aspect.toFixed(2)}` };
+  if (aspect < ASPECT_MIN || aspect > ASPECT_MAX) {
+    return { ok: false, reason: `Seitenverhältnis ${aspect.toFixed(2)}` };
+  }
 
-  return { ok: true };
+  return { ok: true, aspect };
 }
 
 /** Größte Eckpunkt-Verschiebung zwischen zwei Vierecken (für die Stabilitätsprüfung). */
@@ -114,8 +139,8 @@ export const STRIP_WIDTH = 0.47;
  * derselben Zeile und ist sehr klein — es bekommt eine eigene, enger
  * geschnittene und stärker vergrößerte OCR-Passe.
  */
-export const CODE_TOP = 0.845;
-export const CODE_BOTTOM = 0.95;
+export const CODE_TOP = 0.86;
+export const CODE_BOTTOM = 0.975;
 /** Gleiche Hälfte wie die Nummernregion — der Code steht in derselben Zeile. */
 export const CODE_WIDTH = 0.47;
 

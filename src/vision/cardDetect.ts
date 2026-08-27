@@ -1,4 +1,5 @@
 import {
+  aspectError,
   CODE_BOTTOM,
   CODE_TOP,
   CODE_WIDTH,
@@ -153,13 +154,113 @@ export function detectCardQuad(cv: Cv, imageData: ImageData, debug?: string[]): 
   const lap = new cv.Mat();
   const blur = new cv.Mat();
   const edges = new cv.Mat();
+  const hsv = new cv.Mat();
+  const sat = new cv.Mat();
+  const satMask = new cv.Mat();
+  const channels = new cv.MatVector();
   const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
+  const bigKernel = cv.Mat.ones(7, 7, cv.CV_8U);
   const mean = new cv.Mat();
   const stddev = new cv.Mat();
-  let approx: Cv | null = null;
-  let hull: Cv | null = null;
+
+  const frameW = imageData.width;
+  const frameH = imageData.height;
+  const minArea = MIN_AREA_FRACTION * frameW * frameH;
+
+  let best: [Pt, Pt, Pt, Pt] | null = null;
+  let bestScore = Infinity;
+  let bestArea = 0;
+  let lastReason: string | undefined;
+  let borderTouch = false;
+
+  /** Sucht in einem Binärbild nach kartenförmigen Vierecken. */
+  function collectFrom(binary: Cv, source: string): void {
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    let approx: Cv | null = null;
+    let hull: Cv | null = null;
+    try {
+      cv.findContours(binary, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      for (let i = 0; i < contours.size(); i++) {
+        const contour = contours.get(i);
+
+        // Über die KONVEXE HÜLLE messen, nicht über die Rohkontur: Auf einem
+        // Kantenbild ist eine Kartenkontur ein dünner Ring. Bricht der Ring
+        // auf, liefert contourArea nur die Fläche der „Linienschlange“ — die
+        // Karte fiele durch jeden Flächenfilter.
+        hull?.delete();
+        hull = new cv.Mat();
+        cv.convexHull(contour, hull);
+        const area = cv.contourArea(hull);
+        if (area < minArea) {
+          contour.delete();
+          continue;
+        }
+
+        let pts: Pt[] | null = null;
+        const peri = cv.arcLength(hull, true);
+        approx?.delete();
+        approx = new cv.Mat();
+        cv.approxPolyDP(hull, approx, 0.02 * peri, true);
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          pts = [];
+          for (let j = 0; j < 4; j++) {
+            pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+          }
+        } else {
+          // Fallback: gedrehtes Umschließungsrechteck. Fängt abgerundete
+          // Kartenecken und Konturen, die approxPolyDP nicht auf 4 Ecken
+          // reduziert. Nur akzeptieren, wenn die Hülle das Rechteck gut füllt.
+          const rect = cv.minAreaRect(hull);
+          const rectArea = rect.size.width * rect.size.height;
+          if (rectArea > 0 && area / rectArea > 0.7) {
+            const corners = cv.RotatedRect.points(rect);
+            pts = corners.map((p: { x: number; y: number }) => ({ x: p.x, y: p.y }));
+          } else {
+            lastReason = 'kein Viereck';
+          }
+        }
+
+        if (pts && pts.length === 4) {
+          const ordered = orderCorners(pts);
+          const check = isPlausibleCard(ordered, frameW, frameH);
+          const pct = ((area / (frameW * frameH)) * 100).toFixed(1);
+          if (check.ok) {
+            if (touchesBorder(ordered, frameW, frameH)) {
+              borderTouch = true;
+              debug?.push(`${source}#${i} ${pct}% → am Bildrand`);
+            } else {
+              // Nicht der GRÖSSTE Treffer gewinnt, sondern der mit dem
+              // kartenähnlichsten Seitenverhältnis. Auf echten Fotos gibt es
+              // regelmäßig andere Rechtecke (Licht- und Schattenkanten der
+              // Unterlage), die sonst die Karte verdrängen.
+              const score = aspectError(check.aspect ?? 0);
+              const better =
+                score < bestScore - 0.02 || (Math.abs(score - bestScore) <= 0.02 && area > bestArea);
+              if (better) {
+                best = ordered;
+                bestScore = score;
+                bestArea = area;
+                debug?.push(`${source}#${i} ${pct}%, Verh. ${check.aspect?.toFixed(2)} → ANGENOMMEN`);
+              } else {
+                debug?.push(`${source}#${i} ${pct}%, Verh. ${check.aspect?.toFixed(2)} → schlechter`);
+              }
+            }
+          } else {
+            lastReason = check.reason;
+            debug?.push(`${source}#${i} ${pct}% → ${check.reason}`);
+          }
+        }
+        contour.delete();
+      }
+    } finally {
+      contours.delete();
+      hierarchy.delete();
+      approx?.delete();
+      hull?.delete();
+    }
+  }
+
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
@@ -168,86 +269,25 @@ export function detectCardQuad(cv: Cv, imageData: ImageData, debug?: string[]): 
     cv.meanStdDev(lap, mean, stddev);
     const sharpness = stddev.data64F[0] ** 2;
 
+    // Quelle 1: Kanten
     cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
     cv.Canny(blur, edges, 40, 120);
     cv.dilate(edges, edges, kernel);
+    collectFrom(edges, 'Kante');
 
-    // RETR_LIST statt RETR_EXTERNAL: bei einem Kantenbild ist die Karte ein
-    // dünner Ring — dessen INNERE Begrenzung ist oft die sauberere Kontur.
-    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-    const frameW = imageData.width;
-    const frameH = imageData.height;
-    const minArea = MIN_AREA_FRACTION * frameW * frameH;
-    let best: [Pt, Pt, Pt, Pt] | null = null;
-    let bestArea = 0;
-    let lastReason: string | undefined;
-    let borderTouch = false;
-
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-
-      // Über die KONVEXE HÜLLE messen, nicht über die Rohkontur: Auf einem
-      // Kantenbild ist eine Kartenkontur ein dünner Ring. Bricht der Ring auf
-      // (Reflexion, schwacher Kontrast), liefert contourArea nur die Fläche
-      // der „Linienschlange“ — die Karte fiele durch jeden Flächenfilter.
-      // Die Hülle stellt die volle Kartenfläche wieder her.
-      hull?.delete();
-      hull = new cv.Mat();
-      cv.convexHull(contour, hull);
-      const area = cv.contourArea(hull);
-      if (area < minArea) {
-        contour.delete();
-        continue;
-      }
-
-      let pts: Pt[] | null = null;
-      const peri = cv.arcLength(hull, true);
-      approx?.delete();
-      approx = new cv.Mat();
-      cv.approxPolyDP(hull, approx, 0.02 * peri, true);
-      if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        pts = [];
-        for (let j = 0; j < 4; j++) {
-          pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-        }
-      } else {
-        // Fallback: gedrehtes Umschließungsrechteck. Fängt abgerundete
-        // Kartenecken und Konturen, die approxPolyDP nicht auf 4 Ecken
-        // reduziert. Nur akzeptieren, wenn die Hülle das Rechteck gut füllt.
-        const rect = cv.minAreaRect(hull);
-        const rectArea = rect.size.width * rect.size.height;
-        if (rectArea > 0 && area / rectArea > 0.7) {
-          const corners = cv.RotatedRect.points(rect);
-          pts = corners.map((p: { x: number; y: number }) => ({ x: p.x, y: p.y }));
-        } else {
-          lastReason = 'kein Viereck';
-        }
-      }
-
-      if (pts && pts.length === 4) {
-        const ordered = orderCorners(pts);
-        const check = isPlausibleCard(ordered, frameW, frameH);
-        if (check.ok) {
-          if (touchesBorder(ordered, frameW, frameH)) {
-            borderTouch = true;
-            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → am Bildrand`);
-          } else if (area > bestArea) {
-            best = ordered;
-            bestArea = area;
-            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → ANGENOMMEN`);
-          } else {
-            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → plausibel, aber kleiner`);
-          }
-        } else {
-          lastReason = check.reason;
-          debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → ${check.reason}`);
-        }
-      } else {
-        debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → kein Viereck`);
-      }
-      contour.delete();
-    }
+    // Quelle 2: Farbsättigung.
+    // Karten sind bunt bedruckt, typische Unterlagen (Tisch, Stoff) sind es
+    // nicht. Auf einem echten Foto war die hellblaue Kartenunterkante zu
+    // kontrastarm für Canny — die Kontur schloss an der Rückzug-Linie, und
+    // der entzerrte Ausschnitt verlor genau die Zeile mit der Nummer.
+    // Über die Sättigung ist die Karte dort klar von der Unterlage getrennt.
+    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+    cv.split(hsv, channels);
+    channels.get(1).copyTo(sat);
+    cv.threshold(sat, satMask, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    cv.morphologyEx(satMask, satMask, cv.MORPH_CLOSE, bigKernel);
+    collectFrom(satMask, 'Sättigung');
 
     if (!best && borderTouch) lastReason = 'Karte ragt aus dem Bild';
     return { quad: best, sharpness, rejectReason: best ? undefined : lastReason };
@@ -257,13 +297,14 @@ export function detectCardQuad(cv: Cv, imageData: ImageData, debug?: string[]): 
     lap.delete();
     blur.delete();
     edges.delete();
+    hsv.delete();
+    sat.delete();
+    satMask.delete();
+    channels.delete();
     kernel.delete();
-    contours.delete();
-    hierarchy.delete();
+    bigKernel.delete();
     mean.delete();
     stddev.delete();
-    approx?.delete();
-    hull?.delete();
   }
 }
 
