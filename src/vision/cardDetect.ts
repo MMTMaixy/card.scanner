@@ -52,29 +52,59 @@ let cvPromise: Promise<Cv> | null = null;
 /** Synchron abgreifbar, sobald geladen — die Erkennungsschleife darf nie warten. */
 let cvSync: Cv | null = null;
 
+/** Lädt eine Datei als klassisches <script> und wartet auf das load-Ereignis. */
+function loadScript(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[data-cv="1"]`);
+    if (existing) {
+      resolve();
+      return;
+    }
+    const el = document.createElement('script');
+    el.src = url;
+    el.async = true;
+    el.dataset.cv = '1';
+    el.onload = () => resolve();
+    el.onerror = () => reject(new Error(`Datei nicht ladbar: ${url}`));
+    document.head.appendChild(el);
+  });
+}
+
+/**
+ * OpenCV.js wird bewusst als klassisches <script> geladen, nicht per import().
+ * Als Emscripten-Modul exportiert es ein `then`; ein Modul-Namensraum mit
+ * `then` gilt in JavaScript als Promise-artig, wodurch die Laufzeit beim
+ * dynamischen Import dieses `then` mit falschem Empfänger aufruft und
+ * abbricht. Als Script gibt es das Problem nicht.
+ */
 export function initCv(): Promise<Cv> {
   if (!cvPromise) {
+    const url = new URL(`${import.meta.env.BASE_URL}opencv/opencv.js`, location.href).href;
     setStatus({ state: 'loading', detail: 'lade OpenCV (~13 MB, einmalig) …' });
-    cvPromise = import('@techstark/opencv-js')
-      .then(async (mod) => {
-        // Das UMD-Modul exportiert je nach Bundling das cv-Objekt direkt
-        // oder ein Promise darauf (Emscripten-readyPromise).
+    cvPromise = loadScript(url)
+      .then(async () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const candidate: any = await Promise.resolve((mod as any).default ?? mod);
-        if (candidate?.Mat) {
-          cvSync = candidate as Cv;
-          setStatus({ state: 'ready', detail: 'bereit' });
-          return candidate as Cv;
+        let candidate: any = (window as any).cv;
+        if (!candidate) throw new Error('Script geladen, aber window.cv fehlt');
+
+        // Emscripten liefert je nach Build direkt das Modul, ein echtes
+        // Promise darauf, oder erst nach onRuntimeInitialized ein fertiges.
+        if (typeof candidate.then === 'function' && !candidate.Mat) {
+          candidate = await candidate;
         }
-        // Fallback: auf onRuntimeInitialized warten
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('OpenCV-Initialisierung: Timeout nach 30 s')), 30_000);
-          candidate.onRuntimeInitialized = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-        });
-        if (!candidate?.Mat) throw new Error('OpenCV geladen, aber cv.Mat fehlt');
+        if (!candidate?.Mat) {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('Zeitüberschreitung nach 60 s bei der Initialisierung')),
+              60_000,
+            );
+            candidate.onRuntimeInitialized = () => {
+              clearTimeout(timeout);
+              resolve();
+            };
+          });
+        }
+        if (!candidate?.Mat) throw new Error('geladen, aber cv.Mat fehlt');
         cvSync = candidate as Cv;
         setStatus({ state: 'ready', detail: 'bereit' });
         return candidate as Cv;
@@ -83,7 +113,7 @@ export function initCv(): Promise<Cv> {
         cvPromise = null;
         const msg = err instanceof Error ? err.message : String(err);
         setStatus({ state: 'error', detail: msg });
-        throw new Error(`OpenCV konnte nicht geladen werden: ${msg}`);
+        throw new Error(`OpenCV konnte nicht geladen werden: ${msg} (${url})`);
       });
   }
   return cvPromise;

@@ -66,7 +66,11 @@ const report = await page.evaluate(async () => {
   void assets;
   // Dateinamen aus dem Precache-Manifest sind gehasht; den OpenCV-Chunk
   // finden wir über das Verzeichnislisting nicht — daher gezielt laden.
-  const urls = ['./tesseract/tesseract-core-simd-lstm.wasm.js', './tesseract/worker.min.js'];
+  const urls = [
+    './tesseract/tesseract-core-simd-lstm.wasm.js',
+    './tesseract/worker.min.js',
+    './opencv/opencv.js',
+  ];
   const fetched = [];
   for (const u of urls) {
     const r = await fetch(u);
@@ -90,12 +94,30 @@ for (const [name, urls] of Object.entries(report.contents)) {
   urls.forEach((u) => console.log('   ' + u));
 }
 
-const runtime = Object.entries(report.contents).find(([n]) => n.includes('rechenkerne'));
-const ok = runtime && runtime[1].some((u) => u.includes('tesseract-core'));
 await browser.close();
-if (!ok) {
-  console.error('\nFEHLGESCHLAGEN: Die Rechenkerne landen nicht im Laufzeit-Cache.');
+
+const problems = [];
+
+// 1. App-Shell muss vollständig vorab gecacht sein, sonst startet die App
+//    offline gar nicht. Besonders leicht zu übersehen: das Haupt-Bundle.
+const precache = Object.entries(report.contents).find(([n]) => n.includes('precache'))?.[1] ?? [];
+if (!precache.some((u) => /\/assets\/.*\.js$/.test(u))) {
+  problems.push('Kein JavaScript-Bundle im Precache — die App startet offline nicht.');
+}
+if (!precache.some((u) => u.endsWith('/index.html'))) problems.push('index.html fehlt im Precache.');
+if (!precache.some((u) => u.includes('traineddata'))) {
+  problems.push('OCR-Sprachdaten fehlen im Precache.');
+}
+
+// 2. Die großen Rechenkerne müssen beim ersten Abruf dauerhaft landen.
+const runtime = Object.entries(report.contents).find(([n]) => n.includes('rechenkerne'))?.[1] ?? [];
+if (!runtime.some((u) => u.includes('tesseract-core'))) problems.push('Tesseract-Kern nicht im Laufzeit-Cache.');
+if (!runtime.some((u) => u.includes('opencv'))) problems.push('OpenCV nicht im Laufzeit-Cache.');
+
+if (problems.length > 0) {
+  console.error('\nFEHLGESCHLAGEN:');
+  problems.forEach((p) => console.error('  - ' + p));
   shutdown(2);
 }
-console.log('\nLaufzeit-Cache greift — offline nach dem ersten Kamerastart nutzbar.');
+console.log('\nApp-Shell vorab gecacht, Rechenkerne landen beim ersten Abruf im Cache.');
 shutdown(0);

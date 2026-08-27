@@ -197,10 +197,23 @@ exportieren geht von Anfang an offline.
 npm install
 npm run dev          # Dev-Server
 npm test             # Unit-Tests (CSV, Nummern-Parsing, Plausibilität, Geometrie, dHash)
-npm run test:vision  # Vision-Pipeline im echten Browser (headless Chromium)
-npm run check:sw     # prüft nach dem Build, was offline gecacht wird
-npm run build        # Typecheck + Produktions-Build nach dist/
+npm run test:vision       # Vision-Pipeline im Browser, gegen den Dev-Server
+npm run build             # Typecheck + Produktions-Build nach dist/
+npm run test:vision:prod  # dieselbe Prüfung gegen den gebauten Stand
+npm run check:sw          # prüft nach dem Build, was offline gecacht wird
 ```
+
+**Beide Vision-Varianten laufen lassen.** Dev-Server und Bundler behandeln
+Module unterschiedlich: OpenCV.js ist ein Emscripten-Modul, das ein `then`
+exportiert — beim dynamischen Import hält JavaScript den Modul-Namensraum
+deshalb für ein Promise und bricht ab. Im Dev-Server fiel das nicht auf, im
+Produktions-Build stürzte der Kamerastart ab. Deshalb wird OpenCV.js jetzt
+als klassisches `<script>` aus `public/opencv/` geladen (kopiert automatisch
+vor `dev` und `build`) und der Test läuft in beiden Modi.
+
+Die gebaute `selftest.html` liegt auch auf der Website (nirgends verlinkt) —
+`…/card.scanner/selftest.html` lässt sich direkt **auf dem Tablet** öffnen,
+um dort zu prüfen, ob Kartenerkennung und OCR funktionieren.
 
 `npm run test:vision` ist der wichtigste Test für alles rund um die Kamera:
 Er projiziert eine synthetische Karte mit bekannter Nummer per bekannter

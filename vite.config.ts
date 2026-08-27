@@ -26,8 +26,12 @@ export default defineConfig({
       workbox: {
         // Vorab (bei der Installation) nur die App-Shell und die
         // Sprachdaten — zusammen wenige MB.
-        globPatterns: ['**/*.{css,html,png,svg}', 'assets/index-*.js', 'assets/workbox-*.js', 'tesseract/*.traineddata.gz'],
-        globIgnores: ['**/node_modules/**/*', 'sw.js', 'workbox-*.js'],
+        // assets/*.js bewusst als Ganzes: Ein Muster auf einen konkreten
+        // Bundle-Namen bricht still, sobald der Einstiegspunkt umbenannt wird
+        // — dann fehlt das Haupt-Bundle offline. Die großen Rechenkerne
+        // liegen nicht unter assets/, sondern in opencv/ bzw. tesseract/.
+        globPatterns: ['**/*.{css,html,png,svg}', 'assets/*.js', 'tesseract/*.traineddata.gz'],
+        globIgnores: ['**/node_modules/**/*', 'sw.js', 'workbox-*.js', 'selftest.html'],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
@@ -36,7 +40,7 @@ export default defineConfig({
             // EINE lädt). Beim ersten Kamerastart holen und dann dauerhaft
             // behalten — statt bei der Installation alle Varianten zu ziehen.
             urlPattern: ({ url }: { url: URL }) =>
-              /\/assets\/opencv-.*\.js$/.test(url.pathname) ||
+              /\/opencv\/opencv\.js$/.test(url.pathname) ||
               /\/tesseract\/(tesseract-core|worker).*\.js$/.test(url.pathname),
             handler: 'CacheFirst',
             options: {
@@ -52,4 +56,15 @@ export default defineConfig({
   ],
   // Relative Pfade, damit der Build auch aus einem Unterordner (z. B. GitHub Pages) läuft
   base: './',
+  build: {
+    rollupOptions: {
+      // selftest.html wird mitgebaut, damit die Vision-Pipeline gegen den
+      // ECHTEN Produktions-Build geprüft werden kann (und bei Bedarf direkt
+      // auf dem Tablet). Sie ist nirgends verlinkt.
+      input: {
+        main: 'index.html',
+        selftest: 'selftest.html',
+      },
+    },
+  },
 });

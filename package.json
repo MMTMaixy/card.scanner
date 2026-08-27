@@ -9,7 +9,10 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "test:vision": "node scripts/run-vision-test.mjs",
-    "check:sw": "node scripts/check-sw-cache.mjs"
+    "check:sw": "node scripts/check-sw-cache.mjs",
+    "predev": "node scripts/copy-opencv.mjs",
+    "prebuild": "node scripts/copy-opencv.mjs",
+    "test:vision:prod": "node scripts/run-vision-test.mjs --prod"
   },
   "repository": {
     "type": "git",

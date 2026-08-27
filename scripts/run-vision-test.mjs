@@ -1,19 +1,26 @@
 /**
  * Automatischer Test der Vision-Pipeline im echten Browser.
- * Startet den Vite-Dev-Server, lädt selftest.html in Chromium (headless),
- * wartet auf das Ergebnis und beendet alles wieder.
+ * Lädt selftest.html in Chromium (headless), wartet auf das Ergebnis und
+ * beendet alles wieder.
  *
- * Aufruf: npm run test:vision
+ * Aufruf:
+ *   npm run test:vision        gegen den Dev-Server
+ *   npm run test:vision:prod   gegen den Produktions-Build (dist/)
  *
- * Warum ein Browser: OpenCV.js (WASM), Canvas und Tesseract lassen sich in
- * Node nicht sinnvoll nachbilden. Die Kernlogik (Geometrie, Parsing, CSV)
- * wird zusätzlich in den normalen Unit-Tests geprüft.
+ * Beide Varianten sind nötig: Dev-Server und Bundler behandeln Module
+ * unterschiedlich. Ein Ladefehler von OpenCV trat ausschließlich im
+ * Produktions-Build auf und blieb im Dev-Test unsichtbar.
+ *
+ * Warum überhaupt ein Browser: OpenCV.js (WASM), Canvas und Tesseract lassen
+ * sich in Node nicht sinnvoll nachbilden. Die Kernlogik (Geometrie, Parsing,
+ * CSV) prüfen zusätzlich die normalen Unit-Tests.
  */
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright-core';
 import { existsSync } from 'node:fs';
 
-const PORT = 5199;
+const PROD = process.argv.includes('--prod');
+const PORT = PROD ? 4199 : 5199;
 const CHROMIUM_CANDIDATES = [
   process.env.CHROMIUM_PATH,
   '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
@@ -30,9 +37,15 @@ if (!executablePath) {
   process.exit(1);
 }
 
-const vite = spawn('npx', ['vite', 'dev', '--port', String(PORT)], {
+if (PROD && !existsSync(new URL('../dist/selftest.html', import.meta.url))) {
+  console.error('dist/selftest.html fehlt — bitte zuerst `npm run build` ausführen.');
+  process.exit(1);
+}
+
+const vite = spawn('npx', ['vite', PROD ? 'preview' : 'dev', '--port', String(PORT)], {
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+console.log(PROD ? 'Modus: Produktions-Build (dist/)' : 'Modus: Dev-Server');
 let viteOutput = '';
 vite.stdout.on('data', (d) => (viteOutput += d));
 vite.stderr.on('data', (d) => (viteOutput += d));
