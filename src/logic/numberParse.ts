@@ -23,13 +23,44 @@ export interface ParsedScan {
 }
 
 /**
+ * Typische OCR-Verwechslungen bei Ziffern in kleiner Schrift.
+ * Gemessen an echten Lesungen, z. B. „oosi0a4“ für „005/084“.
+ *
+ * Das ist ungefährlich, weil jede Lesung danach noch zwei harte Prüfungen
+ * bestehen muss: Der Nenner muss exakt der Kartenzahl des gewählten Sets
+ * entsprechen, und zwei aufeinanderfolgende Frames müssen dasselbe ergeben.
+ * Eine falsch „korrigierte“ Lesung fällt dadurch praktisch immer durch.
+ */
+const CONFUSIONS: Record<string, string> = {
+  o: '0', O: '0', Q: '0', D: '0',
+  i: '/', I: '/', l: '/', '|': '/', '\\': '/',
+  s: '5', S: '5',
+  a: '8', B: '8',
+  b: '6', G: '6',
+  g: '9', q: '9',
+  t: '7', T: '7',
+  z: '2', Z: '2',
+  e: '8',
+};
+
+/** Wendet die Verwechslungstabelle an, damit „oosi0a4“ als „005/084“ lesbar wird. */
+export function normalizeOcrDigits(text: string): string {
+  return text.replace(/[a-zA-Z|\\]/g, (ch) => CONFUSIONS[ch] ?? ch);
+}
+
+/**
  * Extrahiert "Zähler/Nenner" aus einem OCR-Text, z. B. "025/185" aus "o25/185 REG".
  * Liefert undefined, wenn kein Muster gefunden wurde.
  */
 export function parseScanText(text: string): ParsedScan | undefined {
-  const m = text.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
-  if (!m) return undefined;
-  return { numerator: m[1], denominator: Number(m[2]) };
+  const direct = text.match(/(\d{1,3})\s*\/\s*(\d{1,3})/);
+  if (direct) return { numerator: direct[1], denominator: Number(direct[2]) };
+  // Zweiter Versuch mit korrigierten Zeichenverwechslungen. Hier bewusst OHNE
+  // erlaubte Leerzeichen: Sonst wird aus Rauschen wie „5 I ee“ ein scheinbar
+  // gültiges „5/88“. Auf der Karte steht die Nummer immer zusammenhängend.
+  const fixed = normalizeOcrDigits(text).match(/(\d{1,3})\/(\d{1,3})/);
+  if (!fixed) return undefined;
+  return { numerator: fixed[1], denominator: Number(fixed[2]) };
 }
 
 /**

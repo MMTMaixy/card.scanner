@@ -41,6 +41,13 @@ export interface QuadCheck {
 }
 
 /**
+ * Mindestfläche einer Karte im Bild. Bewusst EINE Konstante für Vorfilter und
+ * Plausibilitätsprüfung — zwei verschiedene Schwellen haben schon dazu geführt,
+ * dass eine erkannte Karte lautlos zwischen den Prüfungen verschwand.
+ */
+export const MIN_AREA_FRACTION = 0.04;
+
+/**
  * Ist das Viereck plausibel eine (aufrecht liegende, beliebig gedrehte/
  * gekippte) Pokémon-Karte? Seitenverhältnis 88:63 ≈ 1,4 mit großzügiger
  * Perspektiv-Toleranz.
@@ -49,7 +56,7 @@ export function isPlausibleCard(ordered: [Pt, Pt, Pt, Pt], frameW: number, frame
   const [tl, tr, br, bl] = ordered;
   const area = polygonArea(ordered);
   const frameArea = frameW * frameH;
-  if (area < 0.06 * frameArea) return { ok: false, reason: 'zu klein' };
+  if (area < MIN_AREA_FRACTION * frameArea) return { ok: false, reason: 'zu klein' };
   if (area > 0.95 * frameArea) return { ok: false, reason: 'zu groß' };
 
   const top = dist(tl, tr);
@@ -84,9 +91,13 @@ export function scaleQuad(q: [Pt, Pt, Pt, Pt], factor: number): [Pt, Pt, Pt, Pt]
   return q.map((p) => ({ x: p.x * factor, y: p.y * factor })) as [Pt, Pt, Pt, Pt];
 }
 
-/** Zielformat der entzerrten Karte (Pixel, Verhältnis 63:88). */
-export const WARP_W = 630;
-export const WARP_H = 880;
+/**
+ * Zielformat der entzerrten Karte (Pixel, Verhältnis 63:88).
+ * Bewusst großzügig: Die Sammlernummer ist auf der Karte nur ~1,5 % der
+ * Kartenhöhe hoch — bei kleinerem Ziel bleibt der OCR zu wenig Substanz.
+ */
+export const WARP_W = 900;
+export const WARP_H = 1257;
 
 /** Nummernbereich in der entzerrten Karte (relative Koordinaten). */
 export const STRIP_TOP = 0.845;

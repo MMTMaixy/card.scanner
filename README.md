@@ -170,14 +170,46 @@ englischen Namen — im Quell-Repo verifiziert):
   Repo-Einstellungen unter *Pages* muss als *Source* **„GitHub Actions“**
   gewählt sein — nicht „Deploy from a branch“.
 
+## Offline-Verhalten und Downloadgröße
+
+Die Installation lädt nur **~2,2 MB** (App + Sprachdaten fürs OCR). Die beiden
+großen Rechenkerne kommen erst beim **ersten Kamerastart** dazu und bleiben
+danach dauerhaft gecacht:
+
+| Was | Größe | Wann |
+|---|---|---|
+| App-Shell, Icons, OCR-Sprachdaten | ~2,2 MB | bei der Installation |
+| OpenCV.js (Kartenerkennung) | ~15 MB | beim ersten Kamerastart |
+| Tesseract-Rechenkern | ~4 MB | beim ersten Kamerastart |
+
+Vom Tesseract-Kern gibt es drei Varianten (je nach Prozessor-Fähigkeiten);
+geladen und gecacht wird nur die eine, die dein Gerät braucht. Vorher wurden
+bei der Installation alle drei plus OpenCV geholt — 29 MB, davon rund 20 MB
+unnötig.
+
+**Konsequenz:** Der erste Kamerastart braucht Internet. Danach funktioniert
+auch das Scannen offline. Listen führen, Nummern eintippen und CSV
+exportieren geht von Anfang an offline.
+
 ## Entwicklung
 
 ```bash
 npm install
 npm run dev          # Dev-Server
-npm test             # Unit-Tests (CSV, Nummern-Parsing, Plausibilität, dHash)
+npm test             # Unit-Tests (CSV, Nummern-Parsing, Plausibilität, Geometrie, dHash)
+npm run test:vision  # Vision-Pipeline im echten Browser (headless Chromium)
+npm run check:sw     # prüft nach dem Build, was offline gecacht wird
 npm run build        # Typecheck + Produktions-Build nach dist/
 ```
+
+`npm run test:vision` ist der wichtigste Test für alles rund um die Kamera:
+Er projiziert eine synthetische Karte mit bekannter Nummer per bekannter
+Perspektivtransformation in eine Szene und prüft dann, ob die Erkennung die
+Ecken trifft (Toleranz 8 px, real erreicht: ~1,5 px) und ob die Nummer aus
+der entzerrten Karte gelesen wird — inklusive des Falls „Karte ragt aus dem
+Bild“, der sauber abgelehnt werden muss. OpenCV, Canvas und Tesseract
+brauchen dafür einen echten Browser; die Kernlogik ohne Bildverarbeitung
+deckt `npm test` ab.
 
 Die OCR-Assets (Tesseract-Worker, WASM, Sprachdaten, ~14 MB) liegen fertig
 in `public/tesseract/` und sind committet — Builds brauchen dafür kein Netz.

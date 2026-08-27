@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { findCardByNumber, normalizeLocalId, parseScanText, scanMatchesSet } from './numberParse';
+import {
+  findCardByNumber,
+  normalizeLocalId,
+  normalizeOcrDigits,
+  parseScanText,
+  scanMatchesSet,
+} from './numberParse';
 import type { SetInfo } from '../types';
 
 const set: SetInfo = {
@@ -49,6 +55,31 @@ describe('parseScanText', () => {
   });
   it('liefert undefined ohne Muster', () => {
     expect(parseScanText('PIKACHU')).toBeUndefined();
+  });
+});
+
+describe('parseScanText mit OCR-Verwechslungen', () => {
+  it('korrigiert echte Fehllesungen (im Browser-Selftest gemessen)', () => {
+    // "005/084" wurde als "oosi0a4" bzw. "oosi084" gelesen
+    expect(parseScanText('oosi0a4 wer28 Pom')).toEqual({ numerator: '005', denominator: 84 });
+    expect(parseScanText('oosi084 wales Pom')).toEqual({ numerator: '005', denominator: 84 });
+  });
+
+  it('erfindet keine Nummer aus verstreutem Rauschen', () => {
+    // Genau dieser Text erzeugte mit Leerzeichen-Toleranz ein falsches "5/88"
+    expect(parseScanText('Le — ae Goer 5 I ee <_<’ so 5% rs J')).toBeUndefined();
+    expect(parseScanText('PT jak i gt SY” ees aii')).toBeUndefined();
+  });
+
+  it('bevorzugt eine saubere Lesung gegenüber der Korrektur', () => {
+    expect(parseScanText('136/189')).toEqual({ numerator: '136', denominator: 189 });
+  });
+});
+
+describe('normalizeOcrDigits', () => {
+  it('bildet nur bekannte Verwechslungen ab', () => {
+    expect(normalizeOcrDigits('oOsSiI')).toBe('0055//');
+    expect(normalizeOcrDigits('136/189')).toBe('136/189');
   });
 });
 

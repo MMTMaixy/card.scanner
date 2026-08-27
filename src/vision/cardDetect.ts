@@ -1,4 +1,13 @@
-import { isPlausibleCard, orderCorners, STRIP_TOP, STRIP_WIDTH, WARP_H, WARP_W, type Pt } from './quad';
+import {
+  isPlausibleCard,
+  MIN_AREA_FRACTION,
+  orderCorners,
+  STRIP_TOP,
+  STRIP_WIDTH,
+  WARP_H,
+  WARP_W,
+  type Pt,
+} from './quad';
 
 /**
  * Freie Kartenerkennung mit OpenCV.js (lokal gebündelt, ~13 MB, wird erst
@@ -40,6 +49,8 @@ export function onCvStatus(listener: (s: CvStatus) => void): () => void {
 }
 
 let cvPromise: Promise<Cv> | null = null;
+/** Synchron abgreifbar, sobald geladen — die Erkennungsschleife darf nie warten. */
+let cvSync: Cv | null = null;
 
 export function initCv(): Promise<Cv> {
   if (!cvPromise) {
@@ -51,6 +62,7 @@ export function initCv(): Promise<Cv> {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const candidate: any = await Promise.resolve((mod as any).default ?? mod);
         if (candidate?.Mat) {
+          cvSync = candidate as Cv;
           setStatus({ state: 'ready', detail: 'bereit' });
           return candidate as Cv;
         }
@@ -63,6 +75,7 @@ export function initCv(): Promise<Cv> {
           };
         });
         if (!candidate?.Mat) throw new Error('OpenCV geladen, aber cv.Mat fehlt');
+        cvSync = candidate as Cv;
         setStatus({ state: 'ready', detail: 'bereit' });
         return candidate as Cv;
       })
@@ -77,18 +90,9 @@ export function initCv(): Promise<Cv> {
 }
 
 /** cv, wenn bereits geladen — sonst null (Loop soll nie auf das Laden warten). */
-let cvSync: Cv | null = null;
 export function cvIfReady(): Cv | null {
-  if (!cvSync && status.state === 'ready' && cvPromise) {
-    // Promise ist resolved; synchron abgreifen
-    void cvPromise.then((c) => (cvSync = c));
-  }
   return cvSync;
 }
-// Beim ersten erfolgreichen Laden cvSync füllen
-onCvStatus((s) => {
-  if (s.state === 'ready' && cvPromise) void cvPromise.then((c) => (cvSync = c));
-});
 
 export interface DetectResult {
   /** Geordnete Ecken (TL,TR,BR,BL) in Koordinaten des Eingabebildes, oder null */
@@ -99,12 +103,18 @@ export interface DetectResult {
   rejectReason?: string;
 }
 
+/** Berührt das Viereck den Bildrand? Dann fehlt vermutlich ein Kartenteil. */
+function touchesBorder(quad: [Pt, Pt, Pt, Pt], w: number, h: number): boolean {
+  const m = 3;
+  return quad.some((p) => p.x <= m || p.y <= m || p.x >= w - m || p.y >= h - m);
+}
+
 /**
  * Findet die Kartenkontur in einem (verkleinerten) Frame.
  * Alle cv-Objekte werden hier sauber freigegeben — Leaks lassen die App
  * nach Minuten abstürzen.
  */
-export function detectCardQuad(cv: Cv, imageData: ImageData): DetectResult {
+export function detectCardQuad(cv: Cv, imageData: ImageData, debug?: string[]): DetectResult {
   const src = cv.matFromImageData(imageData);
   const gray = new cv.Mat();
   const lap = new cv.Mat();
@@ -116,6 +126,7 @@ export function detectCardQuad(cv: Cv, imageData: ImageData): DetectResult {
   const mean = new cv.Mat();
   const stddev = new cv.Mat();
   let approx: Cv | null = null;
+  let hull: Cv | null = null;
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
@@ -128,46 +139,84 @@ export function detectCardQuad(cv: Cv, imageData: ImageData): DetectResult {
     cv.Canny(blur, edges, 40, 120);
     cv.dilate(edges, edges, kernel);
 
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    // RETR_LIST statt RETR_EXTERNAL: bei einem Kantenbild ist die Karte ein
+    // dünner Ring — dessen INNERE Begrenzung ist oft die sauberere Kontur.
+    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
     const frameW = imageData.width;
     const frameH = imageData.height;
+    const minArea = MIN_AREA_FRACTION * frameW * frameH;
     let best: [Pt, Pt, Pt, Pt] | null = null;
     let bestArea = 0;
     let lastReason: string | undefined;
+    let borderTouch = false;
 
     for (let i = 0; i < contours.size(); i++) {
       const contour = contours.get(i);
-      const area = cv.contourArea(contour);
-      if (area < 0.06 * frameW * frameH) {
+
+      // Über die KONVEXE HÜLLE messen, nicht über die Rohkontur: Auf einem
+      // Kantenbild ist eine Kartenkontur ein dünner Ring. Bricht der Ring auf
+      // (Reflexion, schwacher Kontrast), liefert contourArea nur die Fläche
+      // der „Linienschlange“ — die Karte fiele durch jeden Flächenfilter.
+      // Die Hülle stellt die volle Kartenfläche wieder her.
+      hull?.delete();
+      hull = new cv.Mat();
+      cv.convexHull(contour, hull);
+      const area = cv.contourArea(hull);
+      if (area < minArea) {
         contour.delete();
         continue;
       }
-      const peri = cv.arcLength(contour, true);
+
+      let pts: Pt[] | null = null;
+      const peri = cv.arcLength(hull, true);
       approx?.delete();
       approx = new cv.Mat();
-      cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+      cv.approxPolyDP(hull, approx, 0.02 * peri, true);
       if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        const pts: Pt[] = [];
+        pts = [];
         for (let j = 0; j < 4; j++) {
           pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
         }
+      } else {
+        // Fallback: gedrehtes Umschließungsrechteck. Fängt abgerundete
+        // Kartenecken und Konturen, die approxPolyDP nicht auf 4 Ecken
+        // reduziert. Nur akzeptieren, wenn die Hülle das Rechteck gut füllt.
+        const rect = cv.minAreaRect(hull);
+        const rectArea = rect.size.width * rect.size.height;
+        if (rectArea > 0 && area / rectArea > 0.7) {
+          const corners = cv.RotatedRect.points(rect);
+          pts = corners.map((p: { x: number; y: number }) => ({ x: p.x, y: p.y }));
+        } else {
+          lastReason = 'kein Viereck';
+        }
+      }
+
+      if (pts && pts.length === 4) {
         const ordered = orderCorners(pts);
         const check = isPlausibleCard(ordered, frameW, frameH);
         if (check.ok) {
-          if (area > bestArea) {
+          if (touchesBorder(ordered, frameW, frameH)) {
+            borderTouch = true;
+            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → am Bildrand`);
+          } else if (area > bestArea) {
             best = ordered;
             bestArea = area;
+            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → ANGENOMMEN`);
+          } else {
+            debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → plausibel, aber kleiner`);
           }
         } else {
           lastReason = check.reason;
+          debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → ${check.reason}`);
         }
       } else {
-        lastReason = 'kein Viereck';
+        debug?.push(`#${i} Fläche ${((area / (frameW * frameH)) * 100).toFixed(1)}% → kein Viereck`);
       }
       contour.delete();
     }
 
+    if (!best && borderTouch) lastReason = 'Karte ragt aus dem Bild';
     return { quad: best, sharpness, rejectReason: best ? undefined : lastReason };
   } finally {
     src.delete();
@@ -181,6 +230,7 @@ export function detectCardQuad(cv: Cv, imageData: ImageData): DetectResult {
     mean.delete();
     stddev.delete();
     approx?.delete();
+    hull?.delete();
   }
 }
 
@@ -220,10 +270,19 @@ export function warpCard(cv: Cv, srcCanvas: HTMLCanvasElement, quad: [Pt, Pt, Pt
  * wendet CLAHE (adaptive Kontrastnormalisierung — hilft bei wenig Licht)
  * an und skaliert für die OCR hoch.
  */
+/**
+ * 'binary' = CLAHE + adaptive Schwelle (beste Wahl, wenn die Karte den Sucher
+ * gut füllt), 'gray' = nur CLAHE (besser, wenn die Nummer sehr klein ist und
+ * die Binarisierung zu viel Substanz wegschneidet). Der Scanner probiert
+ * 'binary' zuerst und fällt auf 'gray' zurück.
+ */
+export type StripVariant = 'binary' | 'gray';
+
 export function extractNumberStrip(
   cv: Cv,
   warpedCanvas: HTMLCanvasElement,
   side: 'left' | 'right',
+  variant: StripVariant = 'binary',
 ): HTMLCanvasElement {
   const x = side === 'left' ? 0 : Math.round(WARP_W * (1 - STRIP_WIDTH));
   const y = Math.round(WARP_H * STRIP_TOP);
@@ -235,14 +294,26 @@ export function extractNumberStrip(
   const gray = new cv.Mat();
   const enhanced = new cv.Mat();
   const resized = new cv.Mat();
-  const clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+  const binary = new cv.Mat();
+  // Milder als das Maximum: Auf der fast flachen Kartenfläche verstärkt ein
+  // hoher clipLimit nur Rauschen zu großflächigen Helligkeitsverläufen.
+  const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
   try {
     cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY);
     clahe.apply(gray, enhanced);
     const scale = 2.2;
     cv.resize(enhanced, resized, new cv.Size(Math.round(w * scale), Math.round(h * scale)), 0, 0, cv.INTER_CUBIC);
     const out = document.createElement('canvas');
-    cv.imshow(out, resized);
+    if (variant === 'gray') {
+      cv.imshow(out, resized);
+      return out;
+    }
+    // Adaptive Schwelle: macht die Ziffern schwarz auf weiß und entfernt
+    // Helligkeitsverläufe. Ohne diesen Schritt lieferte Tesseract im Selftest
+    // auf einer gestochen scharfen Nummer leeren Text, weil seine interne
+    // Schwellwertbildung am Verlauf scheiterte.
+    cv.adaptiveThreshold(resized, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 41, 12);
+    cv.imshow(out, binary);
     return out;
   } finally {
     full.delete();
@@ -250,6 +321,7 @@ export function extractNumberStrip(
     gray.delete();
     enhanced.delete();
     resized.delete();
+    binary.delete();
     clahe.delete();
   }
 }

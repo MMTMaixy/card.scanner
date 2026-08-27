@@ -37,8 +37,12 @@ type Quad = [Pt, Pt, Pt, Pt];
 const DETECT_INTERVAL_MS = 140;
 /** Breite des Frames für die Konturensuche. */
 const DETECT_W = 480;
-/** Frames für die OCR-Quelle (Entzerrung) — Kompromiss Qualität/Tempo. */
-const WORK_W = 1280;
+/**
+ * Obergrenze für die OCR-Quelle. Bewusst hoch: Die Sammlernummer ist winzig,
+ * jede Verkleinerung vor dem Entzerren kostet genau die Details, die die OCR
+ * braucht. Gemessen im Selftest: Aus 1280 wurde „oosi0a4“ statt „005/084“.
+ */
+const WORK_W = 2560;
 /** Mindest-Schärfe (Varianz des Laplace) — darunter keine OCR. */
 const SHARPNESS_MIN = 45;
 /** So viele stabile Frames in Folge, bevor die OCR startet. */
@@ -360,16 +364,26 @@ export function Scanner({ activeSet, onHit }: Props) {
         const warped = warpCard(cv, work, quadWork);
 
         countersRef.current.ocrRuns++;
-        for (const side of ['left', 'right'] as const) {
-          const strip = extractNumberStrip(cv, warped, side);
-          captureInfoRef.current = `Karte ${WARP_W}×${WARP_H}, Streifen ${strip.width}×${strip.height} (CLAHE)`;
-          copyToDiagCanvas(strip, side === 'left' ? diagLeftRef.current : diagRightRef.current);
-          const t0 = performance.now();
-          const text = await recognizeDigits(strip);
-          const ms = Math.round(performance.now() - t0);
-          const raw = text.replace(/\s+/g, ' ').trim();
-          sideDiagRef.current[side] = { raw, parsed: describeParse(raw), ms };
-          if (await handleReading(text)) break;
+        // Beide unteren Ecken, je zwei Vorverarbeitungen. 'binary' trifft
+        // besser, wenn die Karte den Sucher füllt; 'gray' rettet die Fälle,
+        // in denen die Nummer sehr klein ist. Die zweite Variante läuft nur,
+        // wenn die erste nichts Gültiges ergab.
+        outer: for (const side of ['left', 'right'] as const) {
+          for (const variant of ['binary', 'gray'] as const) {
+            const strip = extractNumberStrip(cv, warped, side, variant);
+            captureInfoRef.current = `Karte ${WARP_W}×${WARP_H}, Streifen ${strip.width}×${strip.height} (${variant})`;
+            copyToDiagCanvas(strip, side === 'left' ? diagLeftRef.current : diagRightRef.current);
+            const t0 = performance.now();
+            const text = await recognizeDigits(strip);
+            const ms = Math.round(performance.now() - t0);
+            const raw = text.replace(/\s+/g, ' ').trim();
+            sideDiagRef.current[side] = { raw: `${variant}: ${raw}`, parsed: describeParse(raw), ms };
+
+            const parsed = parseScanText(raw);
+            if (!parsed || !activeSet || !scanMatchesSet(parsed, activeSet)) continue;
+            await handleReading(raw);
+            break outer;
+          }
         }
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
