@@ -50,6 +50,11 @@ interface Props {
   onScan: (reading: Reading) => Promise<boolean>;
   /** Foto-Abgleich mit der entzerrten Karte (Fallback ohne lesbare Nummer). */
   onPhotoMatch: (warped: HTMLCanvasElement) => Promise<void>;
+  /**
+   * Erkennung anhalten, solange ein Dialog offen ist. Sonst tauscht ein
+   * weiterer Treffer die offene Set-Rückfrage unter dem Finger aus.
+   */
+  paused?: boolean;
 }
 
 type Phase = 'idle' | 'starting' | 'scanning' | 'error';
@@ -151,7 +156,7 @@ function waitForVideoReady(video: HTMLVideoElement, timeoutMs: number): Promise<
   });
 }
 
-export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
+export function Scanner({ isPlausibleReading, onScan, onPhotoMatch, paused = false }: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [flash, setFlash] = useState<'ok' | null>(null);
@@ -175,6 +180,9 @@ export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
   const locksRef = useRef(new Map<string, number>());
   const audioRef = useRef<AudioContext | null>(null);
   const pausedRef = useRef(false);
+  const externalPauseRef = useRef(false);
+  /** Zuletzt gelesener Set-Code je Kartennummer (spart die teure zweite Passe). */
+  const codeCacheRef = useRef<{ key: string; text: string } | null>(null);
   const detCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const workCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const countersRef = useRef({ analyzed: 0, ocrRuns: 0, rejects: {} as Record<string, number> });
@@ -207,6 +215,11 @@ export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
   }, []);
 
   useEffect(() => stop, [stop]);
+
+  // Von außen angeforderte Pause (offener Dialog)
+  useEffect(() => {
+    externalPauseRef.current = paused;
+  }, [paused]);
 
   // Bei verstecktem Tab pausieren
   useEffect(() => {
@@ -425,13 +438,27 @@ export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
         // Das Kästchen wird erst als dunkler Block lokalisiert, dann strikt
         // innerhalb geschnitten, invertiert und stark vergrößert. Ohne diese
         // Isolierung liefert Tesseract nur Zeichensalat (im Selftest belegt).
+        // Diese Passe ist teuer (mehrere OCR-Läufe). Für dieselbe Kartennummer
+        // läuft sie deshalb nur EINMAL; der Bestätigungs-Frame nutzt das
+        // gespeicherte Ergebnis. Das halbiert die Wartezeit bis zum Treffer.
+        const parsedNow = parseScanText(numberText);
+        const codeKey = parsedNow
+          ? `${normalizeLocalId(parsedNow.numerator)}/${parsedNow.denominator}`
+          : '';
         let codeText = '';
-        for (const side of ['left', 'right'] as const) {
-          for (const [i, box] of extractCodeBoxes(cv, warped, side).entries()) {
-            if (side === 'left' && i === 0) copyToDiagCanvas(box, diagCodeRef.current);
-            const text = (await recognizeCode(box)).replace(/\s+/g, ' ').trim();
-            if (text) codeText += (codeText ? ' ' : '') + text;
+        if (codeKey && codeCacheRef.current?.key === codeKey) {
+          codeText = codeCacheRef.current.text;
+        } else {
+          for (const side of ['left', 'right'] as const) {
+            for (const [i, box] of extractCodeBoxes(cv, warped, side).entries()) {
+              if (side === 'left' && i === 0) copyToDiagCanvas(box, diagCodeRef.current);
+              const text = (await recognizeCode(box)).replace(/\s+/g, ' ').trim();
+              if (text) codeText += (codeText ? ' ' : '') + text;
+            }
+            // Rechte Seite nur, wenn links nichts kam
+            if (codeText) break;
           }
+          if (codeKey) codeCacheRef.current = { key: codeKey, text: codeText };
         }
         codeDiagRef.current = codeText || '∅ leer';
 
@@ -454,6 +481,11 @@ export function Scanner({ isPlausibleReading, onScan, onPhotoMatch }: Props) {
       : '–';
 
     if (pausedRef.current) return;
+    if (externalPauseRef.current) {
+      reject('Rückfrage offen');
+      pushDiag(null, 'wartet auf deine Set-Auswahl', videoInfo);
+      return;
+    }
     if (!video || !video.videoWidth || video.readyState < 2) {
       reject('Video nicht bereit');
       pushDiag(null, '–', videoInfo);

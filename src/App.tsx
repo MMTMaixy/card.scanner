@@ -63,6 +63,9 @@ export default function App() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchRef = useRef(batch);
   batchRef.current = batch;
+  /** Aktueller Listenstand, synchron lesbar (siehe commitCard). */
+  const rowsRef = useRef<ScanRow[]>(rows);
+  rowsRef.current = rows;
 
   // --- Start: Index, Einstellungen, Liste laden ---
   useEffect(() => {
@@ -122,24 +125,28 @@ export default function App() {
   useEffect(
     () =>
       onSetEnriched((set) => {
-        setRows((prev) =>
-          prev.map((row) => {
-            if (row.setId !== set.id || row.lang !== set.lang) return row;
-            if (row.availableFinishes.length > 0) return row;
-            const card = set.cards.find((c) => c.localId === row.localId);
-            if (!card) return row;
-            const check = checkFinish(card, row.finish);
-            const updated: ScanRow = {
-              ...row,
-              nameEn: row.nameEn ?? card.nameEn,
-              availableFinishes: check.available,
-              status: check.status,
-              warnReason: check.reason,
-            };
-            db.updateRow(updated).catch(() => {});
-            return updated;
-          }),
-        );
+        // Erst die Änderungen berechnen, dann schreiben — Aktualisierungs-
+        // funktionen von React können mehrfach laufen, ein Datenbankzugriff
+        // darin würde doppelt ausgeführt.
+        const updates = new Map<number, ScanRow>();
+        for (const row of rowsRef.current) {
+          if (row.id == null) continue;
+          if (row.setId !== set.id || row.lang !== set.lang) continue;
+          if (row.availableFinishes.length > 0) continue;
+          const card = set.cards.find((c) => c.localId === row.localId);
+          if (!card) continue;
+          const check = checkFinish(card, row.finish);
+          updates.set(row.id, {
+            ...row,
+            nameEn: row.nameEn ?? card.nameEn,
+            availableFinishes: check.available,
+            status: check.status,
+            warnReason: check.reason,
+          });
+        }
+        if (updates.size === 0) return;
+        setRows((prev) => prev.map((r) => (r.id != null && updates.get(r.id)) || r));
+        updates.forEach((row) => db.updateRow(row).catch(() => {}));
       }),
     [],
   );
@@ -181,29 +188,35 @@ export default function App() {
       const plausibility = checkFinish(card, b.finish);
       const now = Date.now();
 
-      let created = false;
-      setRows((prev) => {
-        const existing = prev.find(
-          (r) =>
-            r.setId === set.id &&
-            r.lang === set.lang &&
-            r.localId === card.localId &&
-            r.finish === b.finish &&
-            r.condition === b.condition &&
-            r.price === b.price,
-        );
-        if (existing && existing.id != null) {
-          const updated: ScanRow = { ...existing, quantity: existing.quantity + 1, updatedAt: now };
-          db.updateRow(updated).catch(reportError);
-          undoStack.current.push({ rowId: existing.id, wasNew: false });
-          showToast(`${set.name}: ${card.nameLocal} #${card.localId} → Menge ${updated.quantity}`, 'ok');
-          return prev.map((r) => (r.id === updated.id ? updated : r));
-        }
-        created = true;
-        return prev;
-      });
+      // Bestand über eine Referenz prüfen, NICHT in einer setRows-Funktion.
+      // React ruft Aktualisierungsfunktionen nicht zuverlässig sofort auf:
+      // Steht bereits eine andere Zustandsänderung an — etwa die Anzeige
+      // „Lade Kartendaten“ bei einem noch unbekannten Set —, läuft sie erst
+      // beim nächsten Rendern. Ein darin gesetztes Merkmal ist danach noch
+      // nicht sichtbar, und die Karte wurde nie eingetragen: genau das
+      // „ich tippe das Set an und es passiert nichts“.
+      const existing = rowsRef.current.find(
+        (r) =>
+          r.setId === set.id &&
+          r.lang === set.lang &&
+          r.localId === card.localId &&
+          r.finish === b.finish &&
+          r.condition === b.condition &&
+          r.price === b.price,
+      );
 
-      if (created) {
+      if (existing?.id != null) {
+        const updated: ScanRow = { ...existing, quantity: existing.quantity + 1, updatedAt: now };
+        try {
+          await db.updateRow(updated);
+        } catch (err) {
+          reportError(err);
+          return false;
+        }
+        setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+        undoStack.current.push({ rowId: existing.id, wasNew: false });
+        showToast(`${set.name}: ${card.nameLocal} #${card.localId} → Menge ${updated.quantity}`, 'ok');
+      } else {
         const newRow: Omit<ScanRow, 'id'> = {
           setId: set.id,
           setName: set.name,
@@ -223,18 +236,19 @@ export default function App() {
           createdAt: now,
           updatedAt: now,
         };
+        let saved: ScanRow;
         try {
-          const saved = await db.addRow(newRow);
-          setRows((prev) => [...prev, saved]);
-          if (saved.id != null) undoStack.current.push({ rowId: saved.id, wasNew: true });
-          if (plausibility.status === 'warn') {
-            showToast(`⚠ ${card.nameLocal} #${card.localId}: ${plausibility.reason}`, 'warn');
-          } else {
-            showToast(`${set.name}: ${card.nameLocal} #${card.localId}`, 'ok');
-          }
+          saved = await db.addRow(newRow);
         } catch (err) {
           reportError(err);
           return false;
+        }
+        setRows((prev) => [...prev, saved]);
+        if (saved.id != null) undoStack.current.push({ rowId: saved.id, wasNew: true });
+        if (plausibility.status === 'warn') {
+          showToast(`⚠ ${card.nameLocal} #${card.localId}: ${plausibility.reason}`, 'warn');
+        } else {
+          showToast(`${set.name}: ${card.nameLocal} #${card.localId}`, 'ok');
         }
       }
 
@@ -536,6 +550,7 @@ export default function App() {
           isPlausibleReading={isPlausibleReading}
           onScan={handleScan}
           onPhotoMatch={handlePhotoMatch}
+          paused={pending !== null || rowToRetarget !== null || loadingSet !== null}
         />
         <ManualEntry disabled={false} onSubmit={addByNumber} onUndo={undoLast} />
         <RowList rows={rows} onChange={changeRow} onRemove={removeRow} onChangeSet={setRowToRetarget} />
